@@ -57,7 +57,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL
           df -h
 
-      # Install required host tools, compiler helpers, ccache, and zip utilities
+# Install required host tools, compiler helpers, ccache, pahole (dwarves), and zip utilities
       - name: Install build dependencies
         run: |
           set -euxo pipefail
@@ -69,6 +69,7 @@ jobs:
             ccache \
             cpio \
             curl \
+            dwarves \
             flex \
             git \
             libelf-dev \
@@ -80,6 +81,7 @@ jobs:
             xz-utils \
             zip \
             zstd
+          pahole --version
 
       # Check out this standalone builder repository (scripts and AnyKernel3 config)
       - name: Checkout builder files
