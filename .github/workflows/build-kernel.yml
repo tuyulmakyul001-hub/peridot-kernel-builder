@@ -154,14 +154,23 @@ jobs:
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-      # Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
+# Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
       - name: Download AOSP Clang/LLVM toolchain
         run: |
           set -euxo pipefail
           mkdir -p "${RUNNER_TEMP}/clang"
-          curl -fSL \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz" \
-            -o "${RUNNER_TEMP}/clang.tar.gz"
+          DOWNLOADED=0
+          for REF in refs/heads/android14-release refs/heads/main; do
+            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-${CLANG_VERSION}.tar.gz"
+            if curl -fSL "${URL}" -o "${RUNNER_TEMP}/clang.tar.gz"; then
+              DOWNLOADED=1
+              break
+            fi
+          done
+          if [ "${DOWNLOADED}" -ne 1 ]; then
+            echo "::error::Could not download clang-${CLANG_VERSION} from AOSP."
+            exit 1
+          fi
           tar -xzf "${RUNNER_TEMP}/clang.tar.gz" -C "${RUNNER_TEMP}/clang"
           rm -f "${RUNNER_TEMP}/clang.tar.gz"
           "${RUNNER_TEMP}/clang/bin/clang" --version
