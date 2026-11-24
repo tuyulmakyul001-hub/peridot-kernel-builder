@@ -1,4 +1,4 @@
-name: Build POCO F6 (peridot) LineageOS Kernel
+name: Build POCO F6 (peridot) LineageOS 24.0 Kernel
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "Public GitHub kernel repo (owner/repo)"
         required: true
         type: string
-        default: "LineageOS/android_kernel_xiaomi_sm8635"
+        default: "tuyulmakyul001-hub/android_kernel_xiaomi_sm8635"
       kernel_branch:
         description: "Kernel repository branch to build"
         required: true
@@ -32,6 +32,34 @@ on:
         required: false
         type: string
         default: ""
+      tcp_congestion:
+        description: "Default TCP congestion control (stock or BBR)"
+        required: true
+        type: choice
+        default: "stock"
+        options:
+          - stock
+          - bbr
+      enable_baseband_guard:
+        description: "Enable Baseband-guard LSM (boot/recovery stay writable)"
+        required: false
+        type: boolean
+        default: false
+      enable_droidspaces:
+        description: "Enable Droidspaces container support (SYSVIPC/IPC/PID + GKI kABI patch)"
+        required: false
+        type: boolean
+        default: false
+      enable_unicode_fix:
+        description: "Apply 6.1 Unicode zero-width path bypass fix"
+        required: false
+        type: boolean
+        default: false
+      enable_nethunter_usb:
+        description: "Enable GKI-safe NetHunter USB support (Gadget RNDIS/OBEX/HID, USB Serial/Ethernet)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,13 +85,14 @@ jobs:
             /opt/hostedtoolcache/CodeQL
           df -h
 
-# Install required host tools, compiler helpers, ccache, pahole (dwarves), and zip utilities
+      # Install required host tools, compiler helpers, ccache, pahole (dwarves), gawk, and zip utilities
       - name: Install build dependencies
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc \
+            binutils \
             bison \
             build-essential \
             ccache \
@@ -71,6 +100,7 @@ jobs:
             curl \
             dwarves \
             flex \
+            gawk \
             git \
             libelf-dev \
             libncurses-dev \
@@ -90,7 +120,7 @@ jobs:
           path: builder
           fetch-depth: 1
 
-      # Shallow-clone the public kernel source repository without needing extra tokens
+      # Shallow-clone your public kernel fork on the selected LineageOS 24.0 branch
       - name: Clone kernel source
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
@@ -110,6 +140,11 @@ jobs:
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
           RAW_LOCAL_VERSION: ${{ inputs.local_version }}
+          TCP_CONGESTION: ${{ inputs.tcp_congestion }}
+          ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
+          ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
+          ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
+          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -139,11 +174,12 @@ jobs:
               echo "::error::local_version may only contain letters, numbers, dots, underscores, and hyphens."
               exit 1
             fi
-            KERNEL_NAME="peridot-los-${LOCAL_SUFFIX}"
+            KERNEL_NAME="peridot-los24-${LOCAL_SUFFIX}"
           else
-            KERNEL_NAME="peridot-los"
+            KERNEL_NAME="peridot-los24"
           fi
 
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -153,10 +189,11 @@ jobs:
             echo "BUILD_DATE=${BUILD_DATE}"
             echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
             echo "KERNEL_NAME=${KERNEL_NAME}"
+            echo "FEATURE_TAG=${FEATURE_TAG}"
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-# Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
+      # Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
       - name: Download AOSP Clang/LLVM toolchain
         run: |
           set -euxo pipefail
@@ -183,8 +220,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.ccache
-          key: ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.SHORT_COMMIT }}
+          key: ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
           restore-keys: |
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
 
@@ -245,10 +283,61 @@ jobs:
             android/abi_gki_protected_exports_aarch64 \
             android/abi_gki_protected_exports_x86_64
 
-      # Merge gki_defconfig with SM8635/peridot vendor fragments and enable root Kconfig symbols
+      # Integrate Baseband-guard LSM (vc-teahouse/Baseband-guard) and add it to security/Kconfig defaults
+      - name: Integrate Baseband-guard LSM
+        if: ${{ inputs.enable_baseband_guard }}
+        run: |
+          set -euxo pipefail
+          cd kernel
+          curl -fLSs \
+            "https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh" \
+            -o "${RUNNER_TEMP}/bbg-setup.sh"
+          bash "${RUNNER_TEMP}/bbg-setup.sh"
+          test -f security/baseband-guard/Kconfig
+
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          grep -q 'baseband_guard' security/Kconfig
+
+      # Dry-run and apply the mandatory Droidspaces GKI SYSVIPC kABI padding patch (for kernels 5.4-6.6)
+      - name: Apply Droidspaces kABI padding patch
+        if: ${{ inputs.enable_droidspaces }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          git clone --depth=1 --single-branch \
+            https://github.com/ravindu644/Droidspaces-OSS.git \
+            "${RUNNER_TEMP}/Droidspaces-OSS"
+
+          PATCH_PATH="${RUNNER_TEMP}/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
+          test -f "${PATCH_PATH}"
+
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
+
+      # Dry-run and apply the 6.1 Unicode zero-width path bypass fix (gki_ptrace.patch omitted: already fixed in 6.1)
+      - name: Apply 6.1 Unicode path bypass fix
+        if: ${{ inputs.enable_unicode_fix }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          git clone --depth=1 --single-branch \
+            https://github.com/WildKernels/kernel_patches.git \
+            "${RUNNER_TEMP}/wild_kernel_patches"
+
+          UNICODE_PATCH="${RUNNER_TEMP}/wild_kernel_patches/common/unicode_bypass_fix_6.1+.patch"
+          test -f "${UNICODE_PATCH}"
+
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
+
+      # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
+          TCP_CONGESTION: ${{ inputs.tcp_congestion }}
+          ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
+          ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
+          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -270,10 +359,9 @@ jobs:
             vendor/pineapple_GKI.config \
             vendor/peridot_GKI.config
 
+          # Root options
           if [ "${ROOT_VARIANT}" = "kernelsu-next" ]; then
             ./scripts/config --file out/.config -e KSU
-            make "${MAKE_ARGS[@]}" olddefconfig
-            grep -qx 'CONFIG_KSU=y' out/.config
           elif [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
             ./scripts/config --file out/.config -e KSU -e KSU_SUSFS
             for sym in \
@@ -290,9 +378,125 @@ jobs:
                 ./scripts/config --file out/.config -e "${sym}"
               fi
             done
-            make "${MAKE_ARGS[@]}" olddefconfig
+          fi
+
+          # Option 1: TCP congestion control (BBR built-in as default)
+          if [ "${TCP_CONGESTION}" = "bbr" ]; then
+            ./scripts/config --file out/.config \
+              -e TCP_CONG_ADVANCED \
+              -e TCP_CONG_BBR \
+              -e NET_SCH_FQ \
+              -d DEFAULT_CUBIC \
+              -d DEFAULT_RENO \
+              -e DEFAULT_BBR \
+              --set-str DEFAULT_TCP_CONG bbr
+          fi
+
+          # Option 2: Baseband-guard LSM (keep boot and recovery writable, ensure CONFIG_LSM includes baseband_guard)
+          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e BBG \
+              -d BBG_BLOCK_BOOT \
+              -d BBG_BLOCK_RECOVERY
+            CUR_LSM="$(awk -F '=' '/^CONFIG_LSM=/ {gsub(/"/, "", $2); print $2; exit}' out/.config)"
+            if [ -n "${CUR_LSM}" ] && [[ ",${CUR_LSM}," != *",baseband_guard,"* ]]; then
+              ./scripts/config --file out/.config --set-str LSM "${CUR_LSM},baseband_guard"
+            fi
+          fi
+
+          # Option 3: Droidspaces GKI ABI-safe container options (CFS_BANDWIDTH and CGROUP_PIDS omitted intentionally)
+          if [ "${ENABLE_DROIDSPACES}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e SYSVIPC \
+              -e POSIX_MQUEUE \
+              -e IPC_NS \
+              -e PID_NS \
+              -e DEVTMPFS \
+              -e NETFILTER_XT_MATCH_ADDRTYPE \
+              -e USER_NS \
+              -e IP6_NF_NAT \
+              -e IP6_NF_TARGET_MASQUERADE \
+              -e MACVLAN \
+              -e IP_NF_TARGET_REJECT \
+              -e IP6_NF_TARGET_REJECT \
+              -e NETFILTER_XT_TARGET_LOG \
+              -e NETFILTER_XT_MATCH_RECENT \
+              -e IP_SET \
+              -e IP_SET_HASH_IP \
+              -e IP_SET_HASH_NET \
+              -e NETFILTER_XT_SET \
+              -e TMPFS_POSIX_ACL \
+              -e TMPFS_XATTR
+          fi
+
+          # Option 4: GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
+          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e USB_ACM \
+              -e USB_CONFIGFS_SERIAL \
+              -e USB_CONFIGFS_ACM \
+              -e USB_CONFIGFS_OBEX \
+              -e USB_CONFIGFS_NCM \
+              -e USB_CONFIGFS_ECM \
+              -e USB_CONFIGFS_ECM_SUBSET \
+              -e USB_CONFIGFS_RNDIS \
+              -e USB_CONFIGFS_EEM \
+              -e USB_CONFIGFS_MASS_STORAGE \
+              -e USB_CONFIGFS_F_HID \
+              -e USB_SERIAL \
+              -e USB_SERIAL_GENERIC \
+              -e USB_SERIAL_CP210X \
+              -e USB_SERIAL_FTDI_SIO \
+              -e USB_SERIAL_PL2303 \
+              -e USB_SERIAL_CH341 \
+              -e USB_NET_DRIVERS \
+              -e USB_USBNET \
+              -e USB_RTL8150 \
+              -e USB_RTL8152 \
+              -e USB_LAN78XX \
+              -e USB_NET_AX8817X \
+              -e USB_NET_AX88179_178A \
+              -e USB_NET_CDCETHER \
+              -e USB_NET_RNDIS_HOST
+          fi
+
+          # Resolve all Kconfig dependencies
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          # Strict post-olddefconfig verification (never allow silent drops)
+          if [ "${ROOT_VARIANT}" = "kernelsu-next" ]; then
+            grep -qx 'CONFIG_KSU=y' out/.config
+          elif [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
             grep -qx 'CONFIG_KSU=y' out/.config
             grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
+          fi
+
+          if [ "${TCP_CONGESTION}" = "bbr" ]; then
+            grep -qx 'CONFIG_TCP_CONG_BBR=y' out/.config
+            grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
+          fi
+
+          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
+            grep -qx 'CONFIG_BBG=y' out/.config
+            ! grep -qx 'CONFIG_BBG_BLOCK_BOOT=y' out/.config
+            ! grep -qx 'CONFIG_BBG_BLOCK_RECOVERY=y' out/.config
+            grep -E '^CONFIG_LSM=".*baseband_guard.*"' out/.config
+          fi
+
+          if [ "${ENABLE_DROIDSPACES}" = "true" ]; then
+            grep -qx 'CONFIG_SYSVIPC=y' out/.config
+            grep -qx 'CONFIG_POSIX_MQUEUE=y' out/.config
+            grep -qx 'CONFIG_IPC_NS=y' out/.config
+            grep -qx 'CONFIG_PID_NS=y' out/.config
+            grep -qx 'CONFIG_DEVTMPFS=y' out/.config
+          fi
+
+          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
+            grep -qx 'CONFIG_USB_CONFIGFS_RNDIS=y' out/.config
+            grep -qx 'CONFIG_USB_CONFIGFS_OBEX=y' out/.config
+            grep -qx 'CONFIG_USB_CONFIGFS_F_HID=y' out/.config
+            grep -qx 'CONFIG_USB_SERIAL=y' out/.config
+            grep -qx 'CONFIG_USB_USBNET=y' out/.config
           fi
 
       # Compile the GKI kernel Image and capture the full build log
@@ -318,32 +522,7 @@ jobs:
           test -s out/arch/arm64/boot/Image
           ccache -s
 
-      # Package the compiled Image into an official osm0sis/AnyKernel3 zip for peridot
-      - name: Package AnyKernel3 flashable zip
-        env:
-          ROOT_VARIANT: ${{ inputs.root_variant }}
-        run: |
-          set -euxo pipefail
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3"
-          rm -rf \
-            "${RUNNER_TEMP}/AnyKernel3/.git" \
-            "${RUNNER_TEMP}/AnyKernel3/ramdisk" \
-            "${RUNNER_TEMP}/AnyKernel3/patch" \
-            "${RUNNER_TEMP}/AnyKernel3/modules" \
-            "${RUNNER_TEMP}/AnyKernel3/README.md"
-
-          KERNEL_STRING="${KERNEL_NAME} (${ROOT_VARIANT}, ${KERNEL_VERSION}, ${SHORT_COMMIT})"
-          cp -v "${GITHUB_WORKSPACE}/builder/anykernel3/anykernel.sh" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
-          sed -i "s|__KERNEL_STRING__|${KERNEL_STRING}|g" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
-          cp -v kernel/out/arch/arm64/boot/Image "${RUNNER_TEMP}/AnyKernel3/Image"
-
-          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
-          (cd "${RUNNER_TEMP}/AnyKernel3" && zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" .)
-          cp -v kernel/out/arch/arm64/boot/Image "${GITHUB_WORKSPACE}/artifacts/Image"
-          cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
-          ls -lh "${GITHUB_WORKSPACE}/artifacts"
-
-# Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
+      # Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
       - name: Package AnyKernel3 flashable zip
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
@@ -393,6 +572,14 @@ jobs:
           cp -v "${RUNNER_TEMP}/AnyKernel3/Image.gz" "${GITHUB_WORKSPACE}/artifacts/Image.gz"
           cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
           ls -lh "${GITHUB_WORKSPACE}/artifacts"
+
+      # Upload the AnyKernel3 zip, raw Image, Image.gz, and build log as a workflow artifact
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
+          path: artifacts/
+          if-no-files-found: error
 
       # Upload the build log on failure so compilation errors can still be downloaded
       - name: Upload build log on failure
