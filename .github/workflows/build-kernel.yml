@@ -1,0 +1,350 @@
+name: Build POCO F6 (peridot) LineageOS Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Public GitHub kernel repo (owner/repo)"
+        required: true
+        type: string
+        default: "LineageOS/android_kernel_xiaomi_sm8635"
+      kernel_branch:
+        description: "Kernel repository branch to build"
+        required: true
+        type: string
+        default: "lineage-24.0"
+      root_variant:
+        description: "Root integration variant"
+        required: true
+        type: choice
+        default: "none"
+        options:
+          - none
+          - kernelsu-next
+          - kernelsu-next-susfs
+      ksu_ref:
+        description: "Optional KernelSU-Next branch or tag (blank = documented default)"
+        required: false
+        type: string
+        default: ""
+      local_version:
+        description: "Optional kernel name suffix (blank = none)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # Free up disk space on the GitHub-hosted runner before cloning and compiling
+      - name: Free up disk space
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h
+
+      # Install required host tools, compiler helpers, ccache, and zip utilities
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            cpio \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            patch \
+            python3 \
+            tar \
+            xz-utils \
+            zip \
+            zstd
+
+      # Check out this standalone builder repository (scripts and AnyKernel3 config)
+      - name: Checkout builder files
+        uses: actions/checkout@v6
+        with:
+          path: builder
+          fetch-depth: 1
+
+      # Shallow-clone the public kernel source repository without needing extra tokens
+      - name: Clone kernel source
+        env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          set -euxo pipefail
+          if [[ ! "${KERNEL_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::kernel_repo must be in 'owner/repo' format."
+            exit 1
+          fi
+          git clone --depth=1 --single-branch --branch "${KERNEL_BRANCH}" \
+            "https://github.com/${KERNEL_REPO}.git" \
+            kernel
+
+      # Verify kernel version (6.1), required config files, Clang version, and output naming metadata
+      - name: Inspect kernel tree and compute build metadata
+        env:
+          ROOT_VARIANT: ${{ inputs.root_variant }}
+          RAW_LOCAL_VERSION: ${{ inputs.local_version }}
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          VERSION="$(awk -F '=' '/^VERSION[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
+          PATCHLEVEL="$(awk -F '=' '/^PATCHLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
+          SUBLEVEL="$(awk -F '=' '/^SUBLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
+          echo "Detected kernel version: ${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+          test "${VERSION}" = "6"
+          test "${PATCHLEVEL}" = "1"
+
+          test -f arch/arm64/configs/gki_defconfig
+          test -f arch/arm64/configs/vendor/pineapple_GKI.config
+          test -f arch/arm64/configs/vendor/peridot_GKI.config
+
+          test -f build.config.constants
+          CLANG_VERSION="$(awk -F '=' '/^CLANG_VERSION=/ {print $2; exit}' build.config.constants)"
+          test -n "${CLANG_VERSION}"
+          echo "Detected CLANG_VERSION=${CLANG_VERSION}"
+
+          SHORT_COMMIT="$(git rev-parse --short=7 HEAD)"
+          BUILD_DATE="$(date -u +%Y%m%d)"
+
+          LOCAL_SUFFIX="${RAW_LOCAL_VERSION#-}"
+          if [ -n "${LOCAL_SUFFIX}" ]; then
+            if [[ ! "${LOCAL_SUFFIX}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::local_version may only contain letters, numbers, dots, underscores, and hyphens."
+              exit 1
+            fi
+            KERNEL_NAME="peridot-los-${LOCAL_SUFFIX}"
+          else
+            KERNEL_NAME="peridot-los"
+          fi
+
+          ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
+
+          {
+            echo "KERNEL_VERSION=${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+            echo "CLANG_VERSION=${CLANG_VERSION}"
+            echo "SHORT_COMMIT=${SHORT_COMMIT}"
+            echo "BUILD_DATE=${BUILD_DATE}"
+            echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
+            echo "KERNEL_NAME=${KERNEL_NAME}"
+            echo "ZIP_NAME=${ZIP_NAME}"
+          } >> "${GITHUB_ENV}"
+
+      # Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
+      - name: Download AOSP Clang/LLVM toolchain
+        run: |
+          set -euxo pipefail
+          mkdir -p "${RUNNER_TEMP}/clang"
+          curl -fSL \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz" \
+            -o "${RUNNER_TEMP}/clang.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/clang.tar.gz" -C "${RUNNER_TEMP}/clang"
+          rm -f "${RUNNER_TEMP}/clang.tar.gz"
+          "${RUNNER_TEMP}/clang/bin/clang" --version
+          echo "${RUNNER_TEMP}/clang/bin" >> "${GITHUB_PATH}"
+
+      # Restore and persist ccache between workflow runs
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.SHORT_COMMIT }}
+          restore-keys: |
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
+
+      # Set ccache size limits and zero out per-run statistics
+      - name: Configure ccache
+        run: |
+          set -euxo pipefail
+          ccache --set-config=max_size=4G
+          ccache --set-config=compression=true
+          ccache -z
+
+      # Integrate official KernelSU-Next via its documented setup.sh when root_variant is kernelsu-next
+      - name: Integrate KernelSU-Next
+        if: ${{ inputs.root_variant == 'kernelsu-next' }}
+        env:
+          KSU_REF: ${{ inputs.ksu_ref }}
+        run: |
+          set -euxo pipefail
+          cd kernel
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            -o "${RUNNER_TEMP}/ksun-setup.sh"
+          if [ -n "${KSU_REF}" ]; then
+            bash "${RUNNER_TEMP}/ksun-setup.sh" "${KSU_REF}"
+          else
+            bash "${RUNNER_TEMP}/ksun-setup.sh"
+          fi
+          test -f drivers/kernelsu/Kconfig
+
+      # Integrate SUSFS-enabled KernelSU-Next and strictly dry-run/apply simonpunk SUSFS gki-android14-6.1 patches
+      - name: Integrate KernelSU-Next with SUSFS
+        if: ${{ inputs.root_variant == 'kernelsu-next-susfs' }}
+        env:
+          KSU_REF: ${{ inputs.ksu_ref }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          cd kernel
+
+          REF="${KSU_REF:-dev-susfs}"
+          curl -fLSs \
+            "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" \
+            -o "${RUNNER_TEMP}/ksun-susfs-setup.sh"
+          bash "${RUNNER_TEMP}/ksun-susfs-setup.sh" "${REF}"
+          test -f drivers/kernelsu/Kconfig
+
+          git clone --depth=1 --single-branch -b gki-android14-6.1 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            "${RUNNER_TEMP}/susfs4ksu"
+
+          cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
+          cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
+
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" \
+            "${RUNNER_TEMP}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+
+          rm -fv \
+            android/abi_gki_protected_exports_aarch64 \
+            android/abi_gki_protected_exports_x86_64
+
+      # Merge gki_defconfig with SM8635/peridot vendor fragments and enable root Kconfig symbols
+      - name: Configure kernel (.config)
+        env:
+          ROOT_VARIANT: ${{ inputs.root_variant }}
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CC="ccache clang"
+            TARGET_PRODUCT=peridot
+          )
+          if [ -n "${LOCAL_SUFFIX}" ]; then
+            MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
+          fi
+
+          make "${MAKE_ARGS[@]}" \
+            gki_defconfig \
+            vendor/pineapple_GKI.config \
+            vendor/peridot_GKI.config
+
+          if [ "${ROOT_VARIANT}" = "kernelsu-next" ]; then
+            ./scripts/config --file out/.config -e KSU
+            make "${MAKE_ARGS[@]}" olddefconfig
+            grep -qx 'CONFIG_KSU=y' out/.config
+          elif [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
+            ./scripts/config --file out/.config -e KSU -e KSU_SUSFS
+            for sym in \
+              KSU_SUSFS_SUS_PATH \
+              KSU_SUSFS_SUS_MOUNT \
+              KSU_SUSFS_SUS_KSTAT \
+              KSU_SUSFS_SPOOF_UNAME \
+              KSU_SUSFS_ENABLE_LOG \
+              KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+              KSU_SUSFS_OPEN_REDIRECT \
+              KSU_SUSFS_SUS_MAP; do
+              if grep -qE "^config ${sym}$" drivers/kernelsu/Kconfig; then
+                ./scripts/config --file out/.config -e "${sym}"
+              fi
+            done
+            make "${MAKE_ARGS[@]}" olddefconfig
+            grep -qx 'CONFIG_KSU=y' out/.config
+            grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
+          fi
+
+      # Compile the GKI kernel Image and capture the full build log
+      - name: Build kernel Image
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          BUILD_LOG="${GITHUB_WORKSPACE}/build.log"
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CC="ccache clang"
+            TARGET_PRODUCT=peridot
+          )
+          if [ -n "${LOCAL_SUFFIX}" ]; then
+            MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
+          fi
+
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee "${BUILD_LOG}"
+          test -s out/arch/arm64/boot/Image
+          ccache -s
+
+      # Package the compiled Image into an official osm0sis/AnyKernel3 zip for peridot
+      - name: Package AnyKernel3 flashable zip
+        env:
+          ROOT_VARIANT: ${{ inputs.root_variant }}
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3"
+          rm -rf \
+            "${RUNNER_TEMP}/AnyKernel3/.git" \
+            "${RUNNER_TEMP}/AnyKernel3/ramdisk" \
+            "${RUNNER_TEMP}/AnyKernel3/patch" \
+            "${RUNNER_TEMP}/AnyKernel3/modules" \
+            "${RUNNER_TEMP}/AnyKernel3/README.md"
+
+          KERNEL_STRING="${KERNEL_NAME} (${ROOT_VARIANT}, ${KERNEL_VERSION}, ${SHORT_COMMIT})"
+          cp -v "${GITHUB_WORKSPACE}/builder/anykernel3/anykernel.sh" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
+          sed -i "s|__KERNEL_STRING__|${KERNEL_STRING}|g" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
+          cp -v kernel/out/arch/arm64/boot/Image "${RUNNER_TEMP}/AnyKernel3/Image"
+
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          (cd "${RUNNER_TEMP}/AnyKernel3" && zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" .)
+          cp -v kernel/out/arch/arm64/boot/Image "${GITHUB_WORKSPACE}/artifacts/Image"
+          cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
+          ls -lh "${GITHUB_WORKSPACE}/artifacts"
+
+      # Upload the AnyKernel3 zip, raw Image, and build log as a workflow artifact
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
+          path: artifacts/
+          if-no-files-found: error
+
+      # Upload the build log on failure so compilation errors can still be downloaded
+      - name: Upload build log on failure
+        if: failure() && hashFiles('build.log') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: failed-build-log-${{ inputs.root_variant }}-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: error
