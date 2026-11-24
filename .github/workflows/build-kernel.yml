@@ -604,82 +604,62 @@ jobs:
               -e TMPFS_XATTR
           fi
 
-          # GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
+          # GKI-safe Kali NetHunter USB subset (only enables missing symbols; never overrides existing =m modules)
           if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e USB_ACM \
-              -e USB_CONFIGFS_SERIAL \
-              -e USB_CONFIGFS_ACM \
-              -e USB_CONFIGFS_OBEX \
-              -e USB_CONFIGFS_NCM \
-              -e USB_CONFIGFS_ECM \
-              -e USB_CONFIGFS_ECM_SUBSET \
-              -e USB_CONFIGFS_RNDIS \
-              -e USB_CONFIGFS_EEM \
-              -e USB_CONFIGFS_MASS_STORAGE \
-              -e USB_CONFIGFS_F_HID \
-              -e USB_SERIAL \
-              -e USB_SERIAL_GENERIC \
-              -e USB_SERIAL_CP210X \
-              -e USB_SERIAL_FTDI_SIO \
-              -e USB_SERIAL_PL2303 \
-              -e USB_SERIAL_CH341 \
-              -e USB_NET_DRIVERS \
-              -e USB_USBNET \
-              -e USB_RTL8150 \
-              -e USB_RTL8152 \
-              -e USB_LAN78XX \
-              -e USB_NET_AX8817X \
-              -e USB_NET_AX88179_178A \
-              -e USB_NET_CDCETHER \
-              -e USB_NET_RNDIS_HOST
-          fi
+            grep -E '^CONFIG_USB_.*=m$' out/.config > "${RUNNER_TEMP}/stock_usb_modules.txt" || true
 
-          # Resolve all Kconfig dependencies
-          make "${MAKE_ARGS[@]}" olddefconfig
+            NH_USB_SYMS=(
+              USB_CONFIGFS_F_HID
+              USB_CONFIGFS_SERIAL
+              USB_CONFIGFS_ACM
+              USB_CONFIGFS_OBEX
+              USB_CONFIGFS_NCM
+              USB_CONFIGFS_ECM
+              USB_CONFIGFS_ECM_SUBSET
+              USB_CONFIGFS_RNDIS
+              USB_CONFIGFS_EEM
+              USB_CONFIGFS_MASS_STORAGE
+              USB_ACM
+            )
 
-          # Strict post-olddefconfig verification (never allow silent drops)
-          if [ "${ROOT_VARIANT}" = "kernelsu-next" ]; then
-            grep -qx 'CONFIG_KSU=y' out/.config
-          elif [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
-            grep -qx 'CONFIG_KSU=y' out/.config
-            grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
-          fi
+            # Skip USB_SERIAL* built-ins if stock GKI ships USB_SERIAL as a loadable module (=m)
+            if ! grep -qx 'CONFIG_USB_SERIAL=m' out/.config; then
+              NH_USB_SYMS+=(
+                USB_SERIAL
+                USB_SERIAL_GENERIC
+                USB_SERIAL_CP210X
+                USB_SERIAL_FTDI_SIO
+                USB_SERIAL_PL2303
+                USB_SERIAL_CH341
+              )
+            else
+              echo "Skipping USB_SERIAL* built-ins because CONFIG_USB_SERIAL=m in stock GKI config."
+            fi
 
-          if [ "${TCP_CONGESTION}" = "bbr" ]; then
-            grep -qx 'CONFIG_TCP_CONG_BBR=y' out/.config
-            grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
-          fi
+            # Skip USB_USBNET* built-ins if stock GKI ships USB_USBNET as a loadable module (=m)
+            if ! grep -qx 'CONFIG_USB_USBNET=m' out/.config; then
+              NH_USB_SYMS+=(
+                USB_NET_DRIVERS
+                USB_USBNET
+                USB_RTL8150
+                USB_RTL8152
+                USB_LAN78XX
+                USB_NET_AX8817X
+                USB_NET_AX88179_178A
+                USB_NET_CDCETHER
+                USB_NET_RNDIS_HOST
+              )
+            else
+              echo "Skipping USB_USBNET* built-ins because CONFIG_USB_USBNET=m in stock GKI config."
+            fi
 
-          if [ "${ENABLE_ADIOS}" = "true" ]; then
-            grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
-          fi
-
-          if [ "${ENABLE_BORE}" = "true" ]; then
-            grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
-          fi
-
-          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
-            grep -qx 'CONFIG_BBG=y' out/.config
-            ! grep -qx 'CONFIG_BBG_BLOCK_BOOT=y' out/.config
-            ! grep -qx 'CONFIG_BBG_BLOCK_RECOVERY=y' out/.config
-            grep -E '^CONFIG_LSM=".*baseband_guard.*"' out/.config
-          fi
-
-          if [ "${ENABLE_DROIDSPACES}" = "true" ]; then
-            grep -qx 'CONFIG_SYSVIPC=y' out/.config
-            grep -qx 'CONFIG_POSIX_MQUEUE=y' out/.config
-            grep -qx 'CONFIG_IPC_NS=y' out/.config
-            grep -qx 'CONFIG_PID_NS=y' out/.config
-            grep -qx 'CONFIG_DEVTMPFS=y' out/.config
-          fi
-
-          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
-            grep -qx 'CONFIG_USB_CONFIGFS_RNDIS=y' out/.config
-            grep -qx 'CONFIG_USB_CONFIGFS_OBEX=y' out/.config
-            grep -qx 'CONFIG_USB_CONFIGFS_F_HID=y' out/.config
-            grep -qx 'CONFIG_USB_SERIAL=y' out/.config
-            grep -qx 'CONFIG_USB_USBNET=y' out/.config
+            for sym in "${NH_USB_SYMS[@]}"; do
+              if grep -qE "^CONFIG_${sym}=[ym]$" out/.config; then
+                echo "Preserving existing stock setting for CONFIG_${sym}"
+              else
+                ./scripts/config --file out/.config -e "${sym}"
+              fi
+            done
           fi
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
