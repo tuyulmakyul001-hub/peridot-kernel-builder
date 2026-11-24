@@ -343,13 +343,56 @@ jobs:
           cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
           ls -lh "${GITHUB_WORKSPACE}/artifacts"
 
-      # Upload the AnyKernel3 zip, raw Image, and build log as a workflow artifact
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
-          path: artifacts/
-          if-no-files-found: error
+# Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
+      - name: Package AnyKernel3 flashable zip
+        env:
+          ROOT_VARIANT: ${{ inputs.root_variant }}
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3"
+          git clone --depth=1 --single-branch -b arm64-tools https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3-arm64-tools"
+
+          if [ -d "${RUNNER_TEMP}/AnyKernel3-arm64-tools/tools" ]; then
+            TOOLS_SRC="${RUNNER_TEMP}/AnyKernel3-arm64-tools/tools"
+          else
+            TOOLS_SRC="${RUNNER_TEMP}/AnyKernel3-arm64-tools"
+          fi
+
+          for bin in busybox magiskboot magiskpolicy fec httools_static lptools_static snapshotupdater_static; do
+            if [ -f "${TOOLS_SRC}/${bin}" ]; then
+              cp -fv "${TOOLS_SRC}/${bin}" "${RUNNER_TEMP}/AnyKernel3/tools/${bin}"
+            fi
+          done
+          chmod +x "${RUNNER_TEMP}/AnyKernel3/tools/"*
+
+          # Confirm busybox and magiskboot are 64-bit ARM64 binaries before zipping
+          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/busybox" | grep -q "ELF64"
+          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/busybox" | grep -q "AArch64"
+          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/magiskboot" | grep -q "ELF64"
+          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/magiskboot" | grep -q "AArch64"
+
+          rm -rf \
+            "${RUNNER_TEMP}/AnyKernel3/.git" \
+            "${RUNNER_TEMP}/AnyKernel3/.github" \
+            "${RUNNER_TEMP}/AnyKernel3/ramdisk" \
+            "${RUNNER_TEMP}/AnyKernel3/patch" \
+            "${RUNNER_TEMP}/AnyKernel3/modules" \
+            "${RUNNER_TEMP}/AnyKernel3/README.md"
+
+          KERNEL_STRING="${KERNEL_NAME} (${ROOT_VARIANT}, ${KERNEL_VERSION}, ${SHORT_COMMIT})"
+          cp -v "${GITHUB_WORKSPACE}/builder/anykernel3/anykernel.sh" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
+          sed -i "s|__KERNEL_STRING__|${KERNEL_STRING}|g" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
+
+          # Compress raw Image to Image.gz for AnyKernel3
+          gzip -n -9 -c kernel/out/arch/arm64/boot/Image > "${RUNNER_TEMP}/AnyKernel3/Image.gz"
+          test -s "${RUNNER_TEMP}/AnyKernel3/Image.gz"
+
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          (cd "${RUNNER_TEMP}/AnyKernel3" && zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" .)
+          cp -v kernel/out/arch/arm64/boot/Image "${GITHUB_WORKSPACE}/artifacts/Image"
+          cp -v "${RUNNER_TEMP}/AnyKernel3/Image.gz" "${GITHUB_WORKSPACE}/artifacts/Image.gz"
+          cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
+          ls -lh "${GITHUB_WORKSPACE}/artifacts"
 
       # Upload the build log on failure so compilation errors can still be downloaded
       - name: Upload build log on failure
