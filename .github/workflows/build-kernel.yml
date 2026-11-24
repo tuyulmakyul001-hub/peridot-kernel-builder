@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: ""
+      clang_version:
+        description: "Optional AOSP Clang override (e.g. r522817, r530567, r547379; blank = tree default)"
+        required: false
+        type: string
+        default: ""
       tcp_congestion:
         description: "Default TCP congestion control (stock or BBR)"
         required: true
@@ -40,6 +45,34 @@ on:
         options:
           - stock
           - bbr
+      optimize_level:
+        description: "Compiler optimization level (O2 default or O3)"
+        required: true
+        type: choice
+        default: "O2"
+        options:
+          - O2
+          - O3
+      enable_mlgo:
+        description: "Enable MLGO (ML-guided register allocation, if supported by Clang)"
+        required: false
+        type: boolean
+        default: true
+      enable_adios:
+        description: "Enable ADIOS I/O scheduler on 6.1 (requires patches/adios-6.1.patch)"
+        required: false
+        type: boolean
+        default: false
+      enable_bore:
+        description: "Apply KMI-safe BORE scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
+        required: false
+        type: boolean
+        default: false
+      bore_default_on:
+        description: "Start BORE active at boot (sched_bore=1; applies when BORE is enabled)"
+        required: false
+        type: boolean
+        default: true
       enable_baseband_guard:
         description: "Enable Baseband-guard LSM (boot/recovery stay writable)"
         required: false
@@ -113,7 +146,7 @@ jobs:
             zstd
           pahole --version
 
-      # Check out this standalone builder repository (scripts and AnyKernel3 config)
+      # Check out this standalone builder repository (scripts, AnyKernel3 config, and local patches)
       - name: Checkout builder files
         uses: actions/checkout@v6
         with:
@@ -135,12 +168,18 @@ jobs:
             "https://github.com/${KERNEL_REPO}.git" \
             kernel
 
-      # Verify kernel version (6.1), required config files, Clang version, and output naming metadata
+      # Verify kernel version (6.1), required config files, Clang version (or override), and output naming metadata
       - name: Inspect kernel tree and compute build metadata
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
           RAW_LOCAL_VERSION: ${{ inputs.local_version }}
+          RAW_CLANG_VERSION: ${{ inputs.clang_version }}
           TCP_CONGESTION: ${{ inputs.tcp_congestion }}
+          OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
+          ENABLE_MLGO: ${{ inputs.enable_mlgo }}
+          ENABLE_ADIOS: ${{ inputs.enable_adios }}
+          ENABLE_BORE: ${{ inputs.enable_bore }}
+          BORE_DEFAULT_ON: ${{ inputs.bore_default_on }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
@@ -161,9 +200,22 @@ jobs:
           test -f arch/arm64/configs/vendor/peridot_GKI.config
 
           test -f build.config.constants
-          CLANG_VERSION="$(awk -F '=' '/^CLANG_VERSION=/ {print $2; exit}' build.config.constants)"
-          test -n "${CLANG_VERSION}"
-          echo "Detected CLANG_VERSION=${CLANG_VERSION}"
+          TREE_CLANG_VERSION="$(awk -F '=' '/^CLANG_VERSION=/ {print $2; exit}' build.config.constants)"
+          test -n "${TREE_CLANG_VERSION}"
+
+          TRIMMED_CLANG="${RAW_CLANG_VERSION// /}"
+          TRIMMED_CLANG="${TRIMMED_CLANG#clang-}"
+          if [ -n "${TRIMMED_CLANG}" ]; then
+            if [[ ! "${TRIMMED_CLANG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::clang_version may only contain letters, numbers, dots, underscores, and hyphens (for example r530567)."
+              exit 1
+            fi
+            CLANG_VERSION="${TRIMMED_CLANG}"
+            echo "Using overridden CLANG_VERSION=${CLANG_VERSION} (tree default: ${TREE_CLANG_VERSION})"
+          else
+            CLANG_VERSION="${TREE_CLANG_VERSION}"
+            echo "Using tree default CLANG_VERSION=${CLANG_VERSION}"
+          fi
 
           SHORT_COMMIT="$(git rev-parse --short=7 HEAD)"
           BUILD_DATE="$(date -u +%Y%m%d)"
@@ -179,7 +231,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -193,27 +245,56 @@ jobs:
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-      # Download the AOSP prebuilt Clang/LLVM toolchain version specified by build.config.constants
+      # Download the selected AOSP prebuilt Clang/LLVM toolchain across official AOSP branches
       - name: Download AOSP Clang/LLVM toolchain
         run: |
           set -euxo pipefail
           mkdir -p "${RUNNER_TEMP}/clang"
           DOWNLOADED=0
-          for REF in refs/heads/android14-release refs/heads/main; do
+          for REF in refs/heads/main refs/heads/main-kernel refs/heads/android14-release; do
             URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-${CLANG_VERSION}.tar.gz"
             if curl -fSL "${URL}" -o "${RUNNER_TEMP}/clang.tar.gz"; then
+              echo "Downloaded clang-${CLANG_VERSION} from ${REF}"
               DOWNLOADED=1
               break
             fi
           done
           if [ "${DOWNLOADED}" -ne 1 ]; then
-            echo "::error::Could not download clang-${CLANG_VERSION} from AOSP."
+            echo "::error::Could not download clang-${CLANG_VERSION} from AOSP (checked main, main-kernel, and android14-release)."
             exit 1
           fi
           tar -xzf "${RUNNER_TEMP}/clang.tar.gz" -C "${RUNNER_TEMP}/clang"
           rm -f "${RUNNER_TEMP}/clang.tar.gz"
           "${RUNNER_TEMP}/clang/bin/clang" --version
           echo "${RUNNER_TEMP}/clang/bin" >> "${GITHUB_PATH}"
+
+      # Prepare compiler flags for O2/O3 and probe Clang at -O2 for MLGO register allocation support
+      - name: Prepare compiler flags (O2/O3 and MLGO)
+        env:
+          OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
+          ENABLE_MLGO: ${{ inputs.enable_mlgo }}
+        run: |
+          set -euxo pipefail
+          EXTRA_KCFLAGS=""
+
+          if [ "${OPTIMIZE_LEVEL}" = "O3" ]; then
+            EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -O3"
+          fi
+
+          if [ "${ENABLE_MLGO}" = "true" ]; then
+            if printf 'int mlgo_probe(int a, int b) { return a + b; }\n' \
+              | clang --target=aarch64-linux-gnu -O2 -mllvm -regalloc-enable-advisor=release -x c -c - -o /dev/null 2>"${RUNNER_TEMP}/mlgo_probe.err"; then
+              EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -mllvm -regalloc-enable-advisor=release"
+              echo "MLGO regalloc advisor is supported by clang-${CLANG_VERSION} and has been enabled."
+            else
+              echo "::warning::clang-${CLANG_VERSION} rejected -mllvm -regalloc-enable-advisor=release (no MLGO model compiled into this prebuilt); skipping MLGO."
+              cat "${RUNNER_TEMP}/mlgo_probe.err"
+            fi
+          fi
+
+          EXTRA_KCFLAGS="${EXTRA_KCFLAGS# }"
+          echo "Effective EXTRA_KCFLAGS='${EXTRA_KCFLAGS}'"
+          echo "EXTRA_KCFLAGS=${EXTRA_KCFLAGS}" >> "${GITHUB_ENV}"
 
       # Restore and persist ccache between workflow runs
       - name: Cache ccache
@@ -283,6 +364,68 @@ jobs:
             android/abi_gki_protected_exports_aarch64 \
             android/abi_gki_protected_exports_x86_64
 
+      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch
+      - name: Apply ADIOS I/O scheduler patch (6.1)
+        if: ${{ inputs.enable_adios }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
+          if [ ! -f "${ADIOS_PATCH}" ]; then
+            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before enabling enable_adios."
+            exit 1
+          fi
+
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
+
+          ADIOS_SYM="$(git diff -U0 -- block/Kconfig* | awk '/^\+config[[:space:]]+(MQ_)?IOSCHED_ADIOS$/ {print $2; exit}')"
+          if [ -z "${ADIOS_SYM}" ]; then
+            echo "::error::ADIOS patch applied, but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
+            exit 1
+          fi
+          echo "Detected ADIOS Kconfig symbol: ${ADIOS_SYM}"
+          echo "ADIOS_CONFIG_SYM=${ADIOS_SYM}" >> "${GITHUB_ENV}"
+
+      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
+      - name: Apply KMI-safe BORE scheduler patch (6.1)
+        if: ${{ inputs.enable_bore }}
+        env:
+          BORE_DEFAULT_ON: ${{ inputs.bore_default_on }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
+          if [ ! -f "${BORE_PATCH}" ]; then
+            echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling enable_bore."
+            exit 1
+          fi
+
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
+
+          BORE_SYM="$(git diff -U0 -- init/Kconfig kernel/Kconfig* | awk '/^\+config[[:space:]]+SCHED_BORE$/ {print $2; exit}')"
+          if [ -z "${BORE_SYM}" ]; then
+            echo "::error::BORE patch applied, but no SCHED_BORE symbol was found in init/Kconfig or kernel/Kconfig*."
+            exit 1
+          fi
+          echo "Detected BORE Kconfig symbol: ${BORE_SYM}"
+          echo "BORE_CONFIG_SYM=${BORE_SYM}" >> "${GITHUB_ENV}"
+
+          DESIRED_BORE_VAL="1"
+          if [ "${BORE_DEFAULT_ON}" != "true" ]; then
+            DESIRED_BORE_VAL="0"
+          fi
+
+          mapfile -t BORE_FILES < <(grep -rlE '\bsched_bore[[:space:]]*=[[:space:]]*[01];' kernel/sched/)
+          if [ "${#BORE_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly 1 file initializing sched_bore in kernel/sched/, found ${#BORE_FILES[@]}."
+            exit 1
+          fi
+          BORE_SRC="${BORE_FILES[0]}"
+          sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
+          grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
+
       # Integrate Baseband-guard LSM (vc-teahouse/Baseband-guard) and add it to security/Kconfig defaults
       - name: Integrate Baseband-guard LSM
         if: ${{ inputs.enable_baseband_guard }}
@@ -335,6 +478,8 @@ jobs:
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
           TCP_CONGESTION: ${{ inputs.tcp_congestion }}
+          ENABLE_ADIOS: ${{ inputs.enable_adios }}
+          ENABLE_BORE: ${{ inputs.enable_bore }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
@@ -350,7 +495,7 @@ jobs:
             CC="ccache clang"
             TARGET_PRODUCT=peridot
           )
-          if [ -n "${LOCAL_SUFFIX}" ]; then
+          if [ -n "${LOCAL_SUFFIX:-}" ]; then
             MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
           fi
 
@@ -380,7 +525,7 @@ jobs:
             done
           fi
 
-          # Option 1: TCP congestion control (BBR built-in as default)
+          # TCP congestion control (BBR built-in as default)
           if [ "${TCP_CONGESTION}" = "bbr" ]; then
             ./scripts/config --file out/.config \
               -e TCP_CONG_ADVANCED \
@@ -392,7 +537,17 @@ jobs:
               --set-str DEFAULT_TCP_CONG bbr
           fi
 
-          # Option 2: Baseband-guard LSM (keep boot and recovery writable, ensure CONFIG_LSM includes baseband_guard)
+          # ADIOS I/O scheduler
+          if [ "${ENABLE_ADIOS}" = "true" ]; then
+            ./scripts/config --file out/.config -e "${ADIOS_CONFIG_SYM}"
+          fi
+
+          # BORE CPU scheduler
+          if [ "${ENABLE_BORE}" = "true" ]; then
+            ./scripts/config --file out/.config -e "${BORE_CONFIG_SYM}"
+          fi
+
+          # Baseband-guard LSM (keep boot and recovery writable, ensure CONFIG_LSM includes baseband_guard)
           if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
             ./scripts/config --file out/.config \
               -e BBG \
@@ -404,7 +559,7 @@ jobs:
             fi
           fi
 
-          # Option 3: Droidspaces GKI ABI-safe container options (CFS_BANDWIDTH and CGROUP_PIDS omitted intentionally)
+          # Droidspaces GKI ABI-safe container options (CFS_BANDWIDTH and CGROUP_PIDS omitted intentionally)
           if [ "${ENABLE_DROIDSPACES}" = "true" ]; then
             ./scripts/config --file out/.config \
               -e SYSVIPC \
@@ -429,7 +584,7 @@ jobs:
               -e TMPFS_XATTR
           fi
 
-          # Option 4: GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
+          # GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
           if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
             ./scripts/config --file out/.config \
               -e USB_ACM \
@@ -476,6 +631,14 @@ jobs:
             grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
           fi
 
+          if [ "${ENABLE_ADIOS}" = "true" ]; then
+            grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
+          fi
+
+          if [ "${ENABLE_BORE}" = "true" ]; then
+            grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
+          fi
+
           if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
             grep -qx 'CONFIG_BBG=y' out/.config
             ! grep -qx 'CONFIG_BBG_BLOCK_BOOT=y' out/.config
@@ -499,7 +662,7 @@ jobs:
             grep -qx 'CONFIG_USB_USBNET=y' out/.config
           fi
 
-      # Compile the GKI kernel Image and capture the full build log
+      # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
       - name: Build kernel Image
         run: |
           set -euxo pipefail
@@ -514,8 +677,11 @@ jobs:
             CC="ccache clang"
             TARGET_PRODUCT=peridot
           )
-          if [ -n "${LOCAL_SUFFIX}" ]; then
+          if [ -n "${LOCAL_SUFFIX:-}" ]; then
             MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
+          fi
+          if [ -n "${EXTRA_KCFLAGS:-}" ]; then
+            MAKE_ARGS+=(KCFLAGS="${EXTRA_KCFLAGS}")
           fi
 
           make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee "${BUILD_LOG}"
