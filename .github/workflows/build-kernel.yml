@@ -340,7 +340,7 @@ jobs:
           ccache --set-config=compression=true
           ccache -z
 
-      # Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
+# Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
       - name: Integrate root solution
         if: ${{ inputs.root_variant != 'none' }}
         env:
@@ -368,17 +368,10 @@ jobs:
                 -o "${RUNNER_TEMP}/ksun-susfs-setup.sh"
               bash "${RUNNER_TEMP}/ksun-susfs-setup.sh" "${REF}"
               ;;
-            sukisu-nova)
-              REF="${KSU_REF:-main}"
-              curl -fLSs \
-                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
-                -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
-              bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
-              ;;
-            sukisu-nova-susfs|sukisu-nova-susfs-kpm)
+            sukisu-nova|sukisu-nova-susfs|sukisu-nova-susfs-kpm)
               REF="${KSU_REF:-builtin}"
               curl -fLSs \
-                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
+                "https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh" \
                 -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
               bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
               ;;
@@ -767,17 +760,17 @@ jobs:
           test -s out/arch/arm64/boot/Image
           ccache -s
 
-      # Apply SukiSU-Nova KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
+# Apply SukiSU-Nova KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
       - name: Patch kernel Image for KPM (SukiSU-Nova)
         if: ${{ inputs.root_variant == 'sukisu-nova-susfs-kpm' }}
         run: |
           set -euxo pipefail
           cd kernel/out/arch/arm64/boot
           if ! curl -fSL --retry 3 --retry-delay 5 \
-            "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
+            "https://git.zako.shirkneko.top:20004/shirkneko/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
             -o patch_linux; then
             curl -fSL --retry 3 --retry-delay 5 \
-              "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" \
+              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/kpm/patch_linux" \
               -o patch_linux
           fi
           chmod +x patch_linux
