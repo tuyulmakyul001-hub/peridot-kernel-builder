@@ -585,8 +585,6 @@ jobs:
             if [ "${ROOT_VARIANT}" = "sukisu-nova-susfs-kpm" ]; then
               ./scripts/config --file out/.config \
                 -e KPM \
-                -e KALLSYMS \
-                -e KALLSYMS_ALL
             elif [[ "${ROOT_VARIANT}" == sukisu-nova* ]]; then
               ./scripts/config --file out/.config -d KPM
             fi
@@ -764,21 +762,17 @@ jobs:
       - name: Patch kernel Image for KPM (SukiSU-Nova)
         if: ${{ inputs.root_variant == 'sukisu-nova-susfs-kpm' }}
         run: |
-          set -euxo pipefail
-          cd kernel/out/arch/arm64/boot
-          if ! curl -fSL --retry 3 --retry-delay 5 \
-            "https://git.zako.shirkneko.top:20004/shirkneko/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
-            -o patch_linux; then
-            curl -fSL --retry 3 --retry-delay 5 \
-              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/kpm/patch_linux" \
-              -o patch_linux
-          fi
-          chmod +x patch_linux
-          ./patch_linux
-          test -s oImage
-          mv -f oImage Image
-          rm -f patch_linux
-          ls -lh Image
+           set -euxo pipefail
+           cd kernel/out/arch/arm64/boot
+           curl -fSL --retry 3 --retry-delay 5 \
+             "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
+             -o patch_linux
+           chmod +x patch_linux
+           ./patch_linux
+           test -s oImage
+           mv -f oImage Image
+           rm -f patch_linux
+           ls -lh Image
 
       # Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
       - name: Package AnyKernel3 flashable zip
