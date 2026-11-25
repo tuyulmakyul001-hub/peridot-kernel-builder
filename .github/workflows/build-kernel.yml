@@ -3,6 +3,16 @@ name: Build POCO F6 (peridot) LineageOS 24.0 Kernel
 on:
   workflow_dispatch:
     inputs:
+      kernel_repo:
+        description: "Kernel repository (owner/repo)"
+        required: true
+        default: "tuyulmakyul001-hub/android_kernel_xiaomi_sm8635"
+        type: string
+      kernel_branch:
+        description: "Kernel branch, tag, or commit SHA"
+        required: true
+        default: "lineage-24.0"
+        type: string
       root_variant:
         description: "Root / KernelSU variant"
         required: true
@@ -110,16 +120,18 @@ jobs:
         with:
           path: builder
 
-      - name: Checkout POCO F6 (peridot) LineageOS 24.0 kernel source
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
-          repository: tuyulmakyul001-hub/android_kernel_xiaomi_sm8635
-          ref: lineage-24.0
+          repository: ${{ inputs.kernel_repo }}
+          ref: ${{ inputs.kernel_branch }}
           path: kernel
           fetch-depth: 1
 
       - name: Inspect kernel tree and compute build metadata
         env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
           ROOT_VARIANT: ${{ inputs.root_variant }}
           RAW_LOCAL_VERSION: ${{ inputs.local_version }}
           RAW_CLANG_VERSION: ${{ inputs.clang_version }}
@@ -202,8 +214,11 @@ jobs:
 
           ARTIFACT_NAME="${KERNEL_NAME}-${KERNEL_VERSION}-${ROOT_TAG}${FEAT_TAGS}-${BUILD_DATE}-${SHORT_COMMIT}"
           ZIP_NAME="${ARTIFACT_NAME}.zip"
-
+          SOURCE_TAG="$(printf '%s-%s' "${KERNEL_REPO}" "${KERNEL_BRANCH}" | tr -c 'A-Za-z0-9._-' '-')"
           {
+            echo "KERNEL_REPO=${KERNEL_REPO}"
+            echo "KERNEL_BRANCH=${KERNEL_BRANCH}"
+            echo "SOURCE_TAG=${SOURCE_TAG}"          
             echo "KERNEL_VERSION=${KERNEL_VERSION}"
             echo "CLANG_VERSION=${CLANG_VERSION}"
             echo "SHORT_COMMIT=${SHORT_COMMIT}"
@@ -260,11 +275,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.ccache
-          key: ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ github.run_id }}
+          key: ccache-peridot-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ github.run_id }}
           restore-keys: |
-            ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
-            ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-
-            ccache-peridot-${{ env.CLANG_VERSION }}-
+            ccache-peridot-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
+            ccache-peridot-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-
+            ccache-peridot-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-
 
       - name: Prepare compiler flags
         env:
@@ -563,7 +578,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "${ARTIFACT_NAME}" \
-            --notes "POCO F6 (peridot) LineageOS 24.0 kernel ${KERNEL_VERSION} built with Clang ${CLANG_VERSION}. Flags: ${FEATURE_TAG}"
+            --notes "POCO F6 (peridot) kernel ${KERNEL_VERSION} from ${KERNEL_REPO}@${KERNEL_BRANCH} (${SHORT_COMMIT}), built with Clang ${CLANG_VERSION}. Flags: ${FEATURE_TAG}"
 
       - name: Upload flashable kernel zip (test-only artifact)
         if: ${{ !inputs.publish_release }}
