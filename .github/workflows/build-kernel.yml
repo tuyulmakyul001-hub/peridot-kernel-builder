@@ -3,167 +3,121 @@ name: Build POCO F6 (peridot) LineageOS 24.0 Kernel
 on:
   workflow_dispatch:
     inputs:
-      kernel_repo:
-        description: "Public GitHub kernel repo (owner/repo)"
-        required: true
-        type: string
-        default: "tuyulmakyul001-hub/android_kernel_xiaomi_sm8635"
-      kernel_branch:
-        description: "Kernel repository branch to build"
-        required: true
-        type: string
-        default: "lineage-24.0"
       root_variant:
-        description: "Root integration variant"
+        description: "Root / KernelSU variant"
         required: true
+        default: "kernelsu-next-susfs"
         type: choice
-        default: "none"
         options:
-          - none
-          - kernelsu-next
           - kernelsu-next-susfs
-      ksu_ref:
-        description: "Optional KernelSU-Next branch or tag (blank = documented default)"
-        required: false
-        type: string
-        default: ""
+          - kernelsu-next
+          - kernelsu
+          - sukisu-ultra
+          - none
       local_version:
-        description: "Optional kernel name suffix (blank = none)"
+        description: "Optional custom suffix (letters, numbers, ., _, -)"
         required: false
-        type: string
         default: ""
+        type: string
       clang_version:
-        description: "Optional AOSP Clang override (e.g. r522817, r530567, r547379; blank = tree default)"
+        description: "Optional AOSP Clang override (e.g. r530567; blank = tree default)"
         required: false
-        type: string
         default: ""
+        type: string
       tcp_congestion:
-        description: "Default TCP congestion control (stock or BBR)"
+        description: "Default TCP congestion control"
         required: true
+        default: "bbr"
         type: choice
-        default: "stock"
         options:
-          - stock
           - bbr
+          - stock
       optimize_level:
-        description: "Compiler optimization level (O2 default or O3)"
+        description: "Compiler optimization level"
         required: true
-        type: choice
         default: "O2"
+        type: choice
         options:
           - O2
           - O3
       enable_mlgo:
-        description: "Enable MLGO (ML-guided register allocation, if supported by Clang)"
+        description: "Enable Clang MLGO register allocation advisor"
         required: false
-        type: boolean
         default: true
+        type: boolean
       enable_adios:
-        description: "Enable ADIOS I/O scheduler on 6.1 (requires patches/adios-6.1.patch)"
+        description: "Enable ADIOS I/O scheduler (patches/adios-6.1.patch)"
         required: false
-        type: boolean
-        default: false
-      enable_bore:
-        description: "Apply KMI-safe BORE scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
-        required: false
-        type: boolean
-        default: false
-      bore_default_on:
-        description: "Start BORE active at boot (sched_bore=1; applies when BORE is enabled)"
-        required: false
-        type: boolean
         default: true
+        type: boolean
+      enable_bore:
+        description: "Enable KMI-safe BORE CPU scheduler (patches/bore-6.1-kmi-safe.patch)"
+        required: false
+        default: false
+        type: boolean
+      bore_default_on:
+        description: "Enable BORE by default at boot (when enable_bore is checked)"
+        required: false
+        default: true
+        type: boolean
       enable_baseband_guard:
-        description: "Enable Baseband-guard LSM (boot/recovery stay writable)"
+        description: "Enable Baseband-guard LSM"
         required: false
+        default: true
         type: boolean
-        default: false
       enable_droidspaces:
-        description: "Enable Droidspaces container support (SYSVIPC/IPC/PID + GKI kABI patch)"
+        description: "Enable Droidspaces container kernel configs"
         required: false
+        default: true
         type: boolean
-        default: false
       enable_unicode_fix:
-        description: "Apply 6.1 Unicode zero-width path bypass fix"
+        description: "Enable Unicode / NLS UTF-8 path support"
         required: false
+        default: true
         type: boolean
-        default: false
+      publish_release:
+        description: "Publish flashable zip to GitHub Release"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    defaults:
-      run:
-        shell: bash
+  build:
+    name: Build peridot 6.1 kernel
+    runs-on: ubuntu-22.04
 
     steps:
-      # Free up disk space on the GitHub-hosted runner before cloning and compiling
-      - name: Free up disk space
+      - name: Maximize runner disk space
         run: |
           set -euxo pipefail
-          df -h
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
 
-      # Install required host tools, compiler helpers, ccache, pahole (dwarves), gawk, and zip utilities
       - name: Install build dependencies
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc \
-            binutils \
-            bison \
-            build-essential \
-            ccache \
-            cpio \
-            curl \
-            dwarves \
-            flex \
-            gawk \
-            git \
-            libelf-dev \
-            libncurses-dev \
-            libssl-dev \
-            patch \
-            python3 \
-            tar \
-            xz-utils \
-            zip \
-            zstd
-          pahole --version
+            bc bison build-essential ccache cpio curl flex git kmod \
+            libelf-dev libncurses-dev libssl-dev lz4 python3 rsync \
+            unzip xz-utils zip zstd
 
-      # Check out this standalone builder repository (scripts, AnyKernel3 config, and local patches)
-      - name: Checkout builder files
-        uses: actions/checkout@v6
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
         with:
           path: builder
+
+      - name: Checkout POCO F6 (peridot) LineageOS 24.0 kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: tuyulmakyul001-hub/android_kernel_xiaomi_sm8635
+          ref: lineage-24.0
+          path: kernel
           fetch-depth: 1
 
-      # Shallow-clone your public kernel fork on the selected LineageOS 24.0 branch
-      - name: Clone kernel source
-        env:
-          KERNEL_REPO: ${{ inputs.kernel_repo }}
-          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
-        run: |
-          set -euxo pipefail
-          if [[ ! "${KERNEL_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-            echo "::error::kernel_repo must be in 'owner/repo' format."
-            exit 1
-          fi
-          git clone --depth=1 --single-branch --branch "${KERNEL_BRANCH}" \
-            "https://github.com/${KERNEL_REPO}.git" \
-            kernel
-
-      # Verify kernel version (6.1), required config files, Clang version (or override), and output naming metadata
       - name: Inspect kernel tree and compute build metadata
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
@@ -178,7 +132,6 @@ jobs:
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
-          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -186,7 +139,8 @@ jobs:
           VERSION="$(awk -F '=' '/^VERSION[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
           PATCHLEVEL="$(awk -F '=' '/^PATCHLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
           SUBLEVEL="$(awk -F '=' '/^SUBLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
-          echo "Detected kernel version: ${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+          echo "Detected kernel version: ${KERNEL_VERSION}"
           test "${VERSION}" = "6"
           test "${PATCHLEVEL}" = "1"
 
@@ -226,8 +180,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
-          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}"
 
           case "${ROOT_VARIANT}" in
             kernelsu-next-susfs) ROOT_TAG="KSUN-SUSFS" ;;
@@ -262,7 +215,6 @@ jobs:
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-# Cache the extracted AOSP Clang/LLVM toolchain by revision so future runs skip downloading it
       - name: Cache AOSP Clang/LLVM toolchain
         id: cache-clang
         uses: actions/cache@v5
@@ -270,7 +222,6 @@ jobs:
           path: ${{ runner.temp }}/clang
           key: aosp-clang-${{ env.CLANG_VERSION }}
 
-      # Download and verify AOSP Clang/LLVM only on a cache miss, then add it to PATH
       - name: Download AOSP Clang/LLVM toolchain
         env:
           CLANG_CACHE_HIT: ${{ steps.cache-clang.outputs.cache-hit }}
@@ -305,103 +256,62 @@ jobs:
           "${RUNNER_TEMP}/clang/bin/clang" --version
           echo "${RUNNER_TEMP}/clang/bin" >> "${GITHUB_PATH}"
 
-      # Prepare compiler flags for O2/O3 and probe Clang at -O2 for MLGO register allocation support
-      - name: Prepare compiler flags (O2/O3 and MLGO)
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
+            ccache-peridot-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-
+            ccache-peridot-${{ env.CLANG_VERSION }}-
+
+      - name: Prepare compiler flags
         env:
           OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
           ENABLE_MLGO: ${{ inputs.enable_mlgo }}
         run: |
           set -euxo pipefail
           EXTRA_KCFLAGS=""
-
+          if [ "${ENABLE_MLGO}" = "true" ]; then
+            if clang -mllvm -regalloc-enable-advisor=release -x c -c /dev/null -o /dev/null 2>/dev/null; then
+              EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -mllvm -regalloc-enable-advisor=release"
+            else
+              echo "::warning::Selected Clang (${CLANG_VERSION}) does not support -mllvm -regalloc-enable-advisor=release; skipping MLGO."
+            fi
+          fi
           if [ "${OPTIMIZE_LEVEL}" = "O3" ]; then
             EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -O3"
           fi
-
-          if [ "${ENABLE_MLGO}" = "true" ]; then
-            if printf 'int mlgo_probe(int a, int b) { return a + b; }\n' \
-              | clang --target=aarch64-linux-gnu -O2 -mllvm -regalloc-enable-advisor=release -x c -c - -o /dev/null 2>"${RUNNER_TEMP}/mlgo_probe.err"; then
-              EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -mllvm -regalloc-enable-advisor=release"
-              echo "MLGO regalloc advisor is supported by clang-${CLANG_VERSION} and has been enabled."
-            else
-              echo "::warning::clang-${CLANG_VERSION} rejected -mllvm -regalloc-enable-advisor=release (no MLGO model compiled into this prebuilt); skipping MLGO."
-              cat "${RUNNER_TEMP}/mlgo_probe.err"
-            fi
-          fi
-
-          EXTRA_KCFLAGS="${EXTRA_KCFLAGS# }"
-          echo "Effective EXTRA_KCFLAGS='${EXTRA_KCFLAGS}'"
+          EXTRA_KCFLAGS="$(echo "${EXTRA_KCFLAGS}" | xargs)"
           echo "EXTRA_KCFLAGS=${EXTRA_KCFLAGS}" >> "${GITHUB_ENV}"
 
-      # Restore and persist ccache between workflow runs
-      - name: Cache ccache
-        uses: actions/cache@v5
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
-          restore-keys: |
-            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
-            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
-            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
-
-      # Set ccache size limits and zero out per-run statistics
-      - name: Configure ccache
-        run: |
-          set -euxo pipefail
-          ccache --set-config=max_size=4G
-          ccache --set-config=compression=true
-          ccache -z
-
-      # Integrate official KernelSU-Next via its documented setup.sh when root_variant is kernelsu-next
-      - name: Integrate KernelSU-Next
-        if: ${{ inputs.root_variant == 'kernelsu-next' }}
+      - name: Setup root variant (KernelSU / KernelSU-Next / SukiSU)
+        if: ${{ inputs.root_variant != 'none' }}
         env:
-          KSU_REF: ${{ inputs.ksu_ref }}
+          ROOT_VARIANT: ${{ inputs.root_variant }}
         run: |
           set -euxo pipefail
           cd kernel
-          curl -fLSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            -o "${RUNNER_TEMP}/ksun-setup.sh"
-          if [ -n "${KSU_REF}" ]; then
-            bash "${RUNNER_TEMP}/ksun-setup.sh" "${KSU_REF}"
-          else
-            bash "${RUNNER_TEMP}/ksun-setup.sh"
-          fi
-          test -f drivers/kernelsu/Kconfig
+          case "${ROOT_VARIANT}" in
+            kernelsu-next-susfs)
+              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next-susfs
+              git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git "${RUNNER_TEMP}/susfs4ksu"
+              cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
+              cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
+              patch -p1 --forward < "${RUNNER_TEMP}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch" || true
+              ;;
+            kernelsu-next)
+              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+              ;;
+            kernelsu)
+              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+              ;;
+            sukisu-ultra)
+              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+              ;;
+          esac
 
-      # Integrate SUSFS-enabled KernelSU-Next and strictly dry-run/apply simonpunk SUSFS gki-android14-6.1 patches
-      - name: Integrate KernelSU-Next with SUSFS
-        if: ${{ inputs.root_variant == 'kernelsu-next-susfs' }}
-        env:
-          KSU_REF: ${{ inputs.ksu_ref }}
-        run: |
-          set -euxo pipefail
-          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          cd kernel
-
-          REF="${KSU_REF:-dev-susfs}"
-          curl -fLSs \
-            "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" \
-            -o "${RUNNER_TEMP}/ksun-susfs-setup.sh"
-          bash "${RUNNER_TEMP}/ksun-susfs-setup.sh" "${REF}"
-          test -f drivers/kernelsu/Kconfig
-
-          git clone --depth=1 --single-branch -b gki-android14-6.1 \
-            https://gitlab.com/simonpunk/susfs4ksu.git \
-            "${RUNNER_TEMP}/susfs4ksu"
-
-          cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
-          cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
-
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" \
-            "${RUNNER_TEMP}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-
-          rm -fv \
-            android/abi_gki_protected_exports_aarch64 \
-            android/abi_gki_protected_exports_x86_64
-
-      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch
       - name: Apply ADIOS I/O scheduler patch (6.1)
         if: ${{ inputs.enable_adios }}
         run: |
@@ -409,22 +319,19 @@ jobs:
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
           ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
           if [ ! -f "${ADIOS_PATCH}" ]; then
-            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before enabling enable_adios."
+            echo "::error::Missing patches/adios-6.1.patch in your builder repository."
             exit 1
           fi
-
           cd kernel
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
-
-          ADIOS_SYM="$(git diff -U0 -- block/Kconfig* | awk '/^\+config[[:space:]]+(MQ_)?IOSCHED_ADIOS$/ {print $2; exit}')"
+          ADIOS_SYM="$(git diff -U0 -- block/Kconfig.iosched | awk '/^\+config[[:space:]]+MQ_IOSCHED_ADIOS$/ {print $2; exit}')"
           if [ -z "${ADIOS_SYM}" ]; then
-            echo "::error::ADIOS patch applied, but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
+            echo "::error::ADIOS patch applied, but no MQ_IOSCHED_ADIOS symbol was found in block/Kconfig.iosched."
             exit 1
           fi
           echo "Detected ADIOS Kconfig symbol: ${ADIOS_SYM}"
           echo "ADIOS_CONFIG_SYM=${ADIOS_SYM}" >> "${GITHUB_ENV}"
 
-      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
       - name: Apply KMI-safe BORE scheduler patch (6.1)
         if: ${{ inputs.enable_bore }}
         env:
@@ -434,10 +341,9 @@ jobs:
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
           BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
           if [ ! -f "${BORE_PATCH}" ]; then
-            echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling enable_bore."
+            echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository."
             exit 1
           fi
-
           cd kernel
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
 
@@ -463,54 +369,13 @@ jobs:
           sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
           grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
 
-      # Integrate Baseband-guard LSM (vc-teahouse/Baseband-guard) and add it to security/Kconfig defaults
-      - name: Integrate Baseband-guard LSM
+      - name: Setup Baseband-guard LSM
         if: ${{ inputs.enable_baseband_guard }}
         run: |
           set -euxo pipefail
           cd kernel
-          curl -fLSs \
-            "https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh" \
-            -o "${RUNNER_TEMP}/bbg-setup.sh"
-          bash "${RUNNER_TEMP}/bbg-setup.sh"
-          test -f security/baseband-guard/Kconfig
+          curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-          grep -q 'baseband_guard' security/Kconfig
-
-      # Dry-run and apply the mandatory Droidspaces GKI SYSVIPC kABI padding patch (for kernels 5.4-6.6)
-      - name: Apply Droidspaces kABI padding patch
-        if: ${{ inputs.enable_droidspaces }}
-        run: |
-          set -euxo pipefail
-          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          git clone --depth=1 --single-branch \
-            https://github.com/ravindu644/Droidspaces-OSS.git \
-            "${RUNNER_TEMP}/Droidspaces-OSS"
-
-          PATCH_PATH="${RUNNER_TEMP}/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
-          test -f "${PATCH_PATH}"
-
-          cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
-
-      # Dry-run and apply the 6.1 Unicode zero-width path bypass fix (gki_ptrace.patch omitted: already fixed in 6.1)
-      - name: Apply 6.1 Unicode path bypass fix
-        if: ${{ inputs.enable_unicode_fix }}
-        run: |
-          set -euxo pipefail
-          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          git clone --depth=1 --single-branch \
-            https://github.com/WildKernels/kernel_patches.git \
-            "${RUNNER_TEMP}/wild_kernel_patches"
-
-          UNICODE_PATCH="${RUNNER_TEMP}/wild_kernel_patches/common/unicode_bypass_fix_6.1+.patch"
-          test -f "${UNICODE_PATCH}"
-
-          cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
-
-      # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
@@ -519,7 +384,7 @@ jobs:
           ENABLE_BORE: ${{ inputs.enable_bore }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
-          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
+          ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -529,231 +394,179 @@ jobs:
             ARCH=arm64
             LLVM=1
             LLVM_IAS=1
-            CC="ccache clang"
-            TARGET_PRODUCT=peridot
+            CROSS_COMPILE=aarch64-linux-gnu-
           )
-          if [ -n "${LOCAL_SUFFIX:-}" ]; then
-            MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
-          fi
 
           make "${MAKE_ARGS[@]}" \
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/peridot_GKI.config
 
-          # Root options
-          if [ "${ROOT_VARIANT}" = "kernelsu-next" ]; then
-            ./scripts/config --file out/.config -e KSU
-          elif [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
-            ./scripts/config --file out/.config -e KSU -e KSU_SUSFS
-            for sym in \
-              KSU_SUSFS_SUS_PATH \
-              KSU_SUSFS_SUS_MOUNT \
-              KSU_SUSFS_SUS_KSTAT \
-              KSU_SUSFS_SPOOF_UNAME \
-              KSU_SUSFS_ENABLE_LOG \
-              KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-              KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-              KSU_SUSFS_OPEN_REDIRECT \
-              KSU_SUSFS_SUS_MAP; do
-              if grep -qE "^config ${sym}$" drivers/kernelsu/Kconfig; then
-                ./scripts/config --file out/.config -e "${sym}"
-              fi
-            done
+          if [ -n "${LOCAL_SUFFIX}" ]; then
+            ./scripts/config --file out/.config --set-str LOCALVERSION "-${LOCAL_SUFFIX}"
           fi
 
-          # TCP congestion control (BBR built-in as default)
+          if [ "${ROOT_VARIANT}" != "none" ]; then
+            ./scripts/config --file out/.config -e KSU
+          fi
+          if [ "${ROOT_VARIANT}" = "kernelsu-next-susfs" ]; then
+            ./scripts/config --file out/.config -e KSU_SUSFS
+          fi
+
           if [ "${TCP_CONGESTION}" = "bbr" ]; then
             ./scripts/config --file out/.config \
               -e TCP_CONG_ADVANCED \
               -e TCP_CONG_BBR \
-              -e NET_SCH_FQ \
-              -d DEFAULT_CUBIC \
-              -d DEFAULT_RENO \
               -e DEFAULT_BBR \
-              --set-str DEFAULT_TCP_CONG bbr
+              --set-str DEFAULT_TCP_CONG "bbr"
           fi
 
-          # ADIOS I/O scheduler
           if [ "${ENABLE_ADIOS}" = "true" ]; then
-            ./scripts/config --file out/.config -e "${ADIOS_CONFIG_SYM}"
+            ./scripts/config --file out/.config \
+              -e "${ADIOS_CONFIG_SYM}" \
+              -d MQ_IOSCHED_DEFAULT_ADIOS
           fi
 
-          # BORE CPU scheduler
           if [ "${ENABLE_BORE}" = "true" ]; then
             ./scripts/config --file out/.config -e "${BORE_CONFIG_SYM}"
           fi
 
-          # Baseband-guard LSM (keep boot and recovery writable, ensure CONFIG_LSM includes baseband_guard)
           if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e BBG \
-              -d BBG_BLOCK_BOOT \
-              -d BBG_BLOCK_RECOVERY
-            CUR_LSM="$(awk -F '=' '/^CONFIG_LSM=/ {gsub(/"/, "", $2); print $2; exit}' out/.config)"
-            if [ -n "${CUR_LSM}" ] && [[ ",${CUR_LSM}," != *",baseband_guard,"* ]]; then
-              ./scripts/config --file out/.config --set-str LSM "${CUR_LSM},baseband_guard"
+            ./scripts/config --file out/.config -e BBG
+            CURRENT_LSM="$(awk -F '=' '/^CONFIG_LSM=/ {gsub(/"/, "", $2); print $2}' out/.config || true)"
+            if [[ ",${CURRENT_LSM}," != *",baseband_guard,"* ]]; then
+              NEW_LSM="${CURRENT_LSM:+${CURRENT_LSM},}baseband_guard"
+              ./scripts/config --file out/.config --set-str LSM "${NEW_LSM}"
             fi
           fi
 
-          # Droidspaces GKI ABI-safe container options (CFS_BANDWIDTH and CGROUP_PIDS omitted intentionally)
           if [ "${ENABLE_DROIDSPACES}" = "true" ]; then
             ./scripts/config --file out/.config \
               -e SYSVIPC \
               -e POSIX_MQUEUE \
+              -e NAMESPACES \
+              -e UTS_NS \
               -e IPC_NS \
-              -e PID_NS \
-              -e DEVTMPFS \
-              -e NETFILTER_XT_MATCH_ADDRTYPE \
               -e USER_NS \
-              -e IP6_NF_NAT \
-              -e IP6_NF_TARGET_MASQUERADE \
-              -e MACVLAN \
-              -e IP_NF_TARGET_REJECT \
-              -e IP6_NF_TARGET_REJECT \
-              -e NETFILTER_XT_TARGET_LOG \
-              -e NETFILTER_XT_MATCH_RECENT \
-              -e IP_SET \
-              -e IP_SET_HASH_IP \
-              -e IP_SET_HASH_NET \
-              -e NETFILTER_XT_SET \
-              -e TMPFS_POSIX_ACL \
-              -e TMPFS_XATTR
+              -e PID_NS \
+              -e NET_NS \
+              -e CGROUP_DEVICE \
+              -e CGROUP_PIDS \
+              -e MEMCG \
+              -e DEVTMPFS \
+              -e OVERLAY_FS
           fi
 
-          # GKI-safe Kali NetHunter USB subset (only enables missing symbols; never overrides existing =m modules)
-          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
-            grep -E '^CONFIG_USB_.*=m$' out/.config > "${RUNNER_TEMP}/stock_usb_modules.txt" || true
-
-            NH_USB_SYMS=(
-              USB_CONFIGFS_F_HID
-              USB_CONFIGFS_SERIAL
-              USB_CONFIGFS_ACM
-              USB_CONFIGFS_OBEX
-              USB_CONFIGFS_NCM
-              USB_CONFIGFS_ECM
-              USB_CONFIGFS_ECM_SUBSET
-              USB_CONFIGFS_RNDIS
-              USB_CONFIGFS_EEM
-              USB_CONFIGFS_MASS_STORAGE
-              USB_ACM
-            )
-
-            # Skip USB_SERIAL* built-ins if stock GKI ships USB_SERIAL as a loadable module (=m)
-            if ! grep -qx 'CONFIG_USB_SERIAL=m' out/.config; then
-              NH_USB_SYMS+=(
-                USB_SERIAL
-                USB_SERIAL_GENERIC
-                USB_SERIAL_CP210X
-                USB_SERIAL_FTDI_SIO
-                USB_SERIAL_PL2303
-                USB_SERIAL_CH341
-              )
-            else
-              echo "Skipping USB_SERIAL* built-ins because CONFIG_USB_SERIAL=m in stock GKI config."
-            fi
-
-            # Skip USB_USBNET* built-ins if stock GKI ships USB_USBNET as a loadable module (=m)
-            if ! grep -qx 'CONFIG_USB_USBNET=m' out/.config; then
-              NH_USB_SYMS+=(
-                USB_NET_DRIVERS
-                USB_USBNET
-                USB_RTL8150
-                USB_RTL8152
-                USB_LAN78XX
-                USB_NET_AX8817X
-                USB_NET_AX88179_178A
-                USB_NET_CDCETHER
-                USB_NET_RNDIS_HOST
-              )
-            else
-              echo "Skipping USB_USBNET* built-ins because CONFIG_USB_USBNET=m in stock GKI config."
-            fi
-
-            for sym in "${NH_USB_SYMS[@]}"; do
-              if grep -qE "^CONFIG_${sym}=[ym]$" out/.config; then
-                echo "Preserving existing stock setting for CONFIG_${sym}"
-              else
-                ./scripts/config --file out/.config -e "${sym}"
-              fi
-            done
+          if [ "${ENABLE_UNICODE_FIX}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e UNICODE \
+              -e NLS_UTF8
           fi
 
-      # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          if [ "${TCP_CONGESTION}" = "bbr" ]; then
+            grep -qx 'CONFIG_TCP_CONG_BBR=y' out/.config
+            grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
+          fi
+          if [ "${ENABLE_ADIOS}" = "true" ]; then
+            grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
+          fi
+          if [ "${ENABLE_BORE}" = "true" ]; then
+            grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
+          fi
+          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then
+            grep -qx 'CONFIG_BBG=y' out/.config
+            grep -q 'baseband_guard' out/.config
+          fi
+
       - name: Build kernel Image
         run: |
           set -euxo pipefail
           cd kernel
+          ccache -M 4G
+          ccache -z
 
-          BUILD_LOG="${GITHUB_WORKSPACE}/build.log"
           MAKE_ARGS=(
+            -j"$(nproc)"
             O=out
             ARCH=arm64
             LLVM=1
             LLVM_IAS=1
             CC="ccache clang"
-            TARGET_PRODUCT=peridot
+            CROSS_COMPILE=aarch64-linux-gnu-
           )
-          if [ -n "${LOCAL_SUFFIX:-}" ]; then
-            MAKE_ARGS+=(LOCALVERSION="-${LOCAL_SUFFIX}")
-          fi
           if [ -n "${EXTRA_KCFLAGS:-}" ]; then
             MAKE_ARGS+=(KCFLAGS="${EXTRA_KCFLAGS}")
           fi
 
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee "${BUILD_LOG}"
+          make "${MAKE_ARGS[@]}" Image
           test -s out/arch/arm64/boot/Image
           ccache -s
 
-      # Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
       - name: Package AnyKernel3 flashable zip
-        env:
-          ROOT_VARIANT: ${{ inputs.root_variant }}
         run: |
           set -euxo pipefail
+          rm -rf "${RUNNER_TEMP}/AnyKernel3" "${GITHUB_WORKSPACE}/artifacts"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3"
-          git clone --depth=1 --single-branch -b arm64-tools https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3-arm64-tools"
 
-          if [ -d "${RUNNER_TEMP}/AnyKernel3-arm64-tools/tools" ]; then
-            TOOLS_SRC="${RUNNER_TEMP}/AnyKernel3-arm64-tools/tools"
-          else
-            TOOLS_SRC="${RUNNER_TEMP}/AnyKernel3-arm64-tools"
-          fi
+          cat > "${RUNNER_TEMP}/AnyKernel3/anykernel.sh" << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=__KERNEL_NAME__ (__KERNEL_VERSION__)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=peridot
+          device.name2=POCO F6
+          supported.versions=14-16
+          supported.patchlevels=
+          '; }
 
-          for bin in busybox magiskboot magiskpolicy fec httools_static lptools_static snapshotupdater_static; do
-            if [ -f "${TOOLS_SRC}/${bin}" ]; then
-              cp -fv "${TOOLS_SRC}/${bin}" "${RUNNER_TEMP}/AnyKernel3/tools/${bin}"
-            fi
-          done
-          chmod +x "${RUNNER_TEMP}/AnyKernel3/tools/"*
+          block=boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
 
-          # Confirm busybox and magiskboot are 64-bit ARM64 binaries before zipping
-          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/busybox" | grep -q "ELF64"
-          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/busybox" | grep -q "AArch64"
-          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/magiskboot" | grep -q "ELF64"
-          readelf -h "${RUNNER_TEMP}/AnyKernel3/tools/magiskboot" | grep -q "AArch64"
+          . tools/ak3-core.sh;
 
-          rm -rf \
-            "${RUNNER_TEMP}/AnyKernel3/.git" \
-            "${RUNNER_TEMP}/AnyKernel3/.github" \
-            "${RUNNER_TEMP}/AnyKernel3/ramdisk" \
-            "${RUNNER_TEMP}/AnyKernel3/patch" \
-            "${RUNNER_TEMP}/AnyKernel3/modules" \
-            "${RUNNER_TEMP}/AnyKernel3/README.md"
+          split_boot;
+          flash_boot;
+          EOF
 
-          KERNEL_STRING="${KERNEL_NAME} (${ROOT_VARIANT}, ${KERNEL_VERSION}, ${SHORT_COMMIT})"
-          cp -v "${GITHUB_WORKSPACE}/builder/anykernel3/anykernel.sh" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
-          sed -i "s|__KERNEL_STRING__|${KERNEL_STRING}|g" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
+          sed -i "s|__KERNEL_NAME__|${KERNEL_NAME}|g; s|__KERNEL_VERSION__|${KERNEL_VERSION}|g" \
+            "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
 
-          # Compress raw Image to Image.gz for AnyKernel3
           gzip -n -9 -c kernel/out/arch/arm64/boot/Image > "${RUNNER_TEMP}/AnyKernel3/Image.gz"
           test -s "${RUNNER_TEMP}/AnyKernel3/Image.gz"
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
-          ls -lh "${GITHUB_WORKSPACE}/artifacts"
-          
-      # Upload the AnyKernel3 zip, raw Image, Image.gz, and build log as a workflow artifact
-      - name: Upload flashable kernel zip
+          (
+            cd "${RUNNER_TEMP}/AnyKernel3"
+            zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" . -x '*.git*' 'README.md' '*placeholder'
+          )
+          test -s "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}"
+          ls -lh "${GITHUB_WORKSPACE}/artifacts/"
+
+      - name: Publish flashable kernel zip to GitHub Release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          ZIP_PATH="${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}"
+          test -s "${ZIP_PATH}"
+          RELEASE_TAG="${BUILD_DATE}-${SHORT_COMMIT}-r${GITHUB_RUN_NUMBER}"
+          gh release create "${RELEASE_TAG}" "${ZIP_PATH}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${ARTIFACT_NAME}" \
+            --notes "POCO F6 (peridot) LineageOS 24.0 kernel ${KERNEL_VERSION} built with Clang ${CLANG_VERSION}. Flags: ${FEATURE_TAG}"
+
+      - name: Upload flashable kernel zip (test-only artifact)
+        if: ${{ !inputs.publish_release }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
@@ -761,12 +574,3 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 14
-
-      # Upload the build log on failure so compilation errors can still be downloaded
-      - name: Upload build log on failure
-        if: failure() && hashFiles('build.log') != ''
-        uses: actions/upload-artifact@v6
-        with:
-          name: failed-build-log-${{ inputs.root_variant }}-${{ github.run_id }}
-          path: build.log
-          if-no-files-found: error
