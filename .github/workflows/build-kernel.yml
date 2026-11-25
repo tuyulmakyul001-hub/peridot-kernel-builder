@@ -227,6 +227,8 @@ jobs:
           fi
 
           FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
+          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+
           case "${ROOT_VARIANT}" in
             kernelsu-next-susfs) ROOT_TAG="KSUN-SUSFS" ;;
             kernelsu-next)       ROOT_TAG="KSUN" ;;
@@ -236,24 +238,29 @@ jobs:
           esac
 
           FEAT_TAGS=""
-          [ "${TCP_CONGESTION}" = "bbr" ] && FEAT_TAGS="${FEAT_TAGS}-BBR"
-          [ "${OPT_LEVEL}" = "O3" ] && FEAT_TAGS="${FEAT_TAGS}-O3"
-          [ "${ENABLE_MLGO}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-MLGO"
-          [ "${ENABLE_ADIOS}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-ADIOS"
-          [ "${ENABLE_BORE}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-BORE"
-          [ "${ENABLE_BASEBAND_GUARD}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-BBG"
-          [ "${ENABLE_DROIDSPACES}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-DS"
-          [ "${ENABLE_UNICODE_FIX}" = "true" ] && FEAT_TAGS="${FEAT_TAGS}-UNI"
+          if [ "${TCP_CONGESTION}" = "bbr" ]; then FEAT_TAGS="${FEAT_TAGS}-BBR"; fi
+          if [ "${OPTIMIZE_LEVEL}" = "O3" ]; then FEAT_TAGS="${FEAT_TAGS}-O3"; fi
+          if [ "${ENABLE_MLGO}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-MLGO"; fi
+          if [ "${ENABLE_ADIOS}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-ADIOS"; fi
+          if [ "${ENABLE_BORE}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-BORE"; fi
+          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-BBG"; fi
+          if [ "${ENABLE_DROIDSPACES}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-DS"; fi
+          if [ "${ENABLE_UNICODE_FIX}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-UNI"; fi
 
-          SUFFIX_TAG=""
-          if [ -n "${LOCAL_SUFFIX:-}" ]; then
-            SUFFIX_TAG="-${LOCAL_SUFFIX}"
-          fi
-
-          ARTIFACT_NAME="${KERNEL_NAME}-${KERNEL_VERSION}-${ROOT_TAG}${FEAT_TAGS}-${BUILD_DATE}-${SHORT_COMMIT}${SUFFIX_TAG}"
+          ARTIFACT_NAME="${KERNEL_NAME}-${KERNEL_VERSION}-${ROOT_TAG}${FEAT_TAGS}-${BUILD_DATE}-${SHORT_COMMIT}"
           ZIP_NAME="${ARTIFACT_NAME}.zip"
-          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> "${GITHUB_ENV}"
-          echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
+
+          {
+            echo "KERNEL_VERSION=${KERNEL_VERSION}"
+            echo "CLANG_VERSION=${CLANG_VERSION}"
+            echo "SHORT_COMMIT=${SHORT_COMMIT}"
+            echo "BUILD_DATE=${BUILD_DATE}"
+            echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
+            echo "KERNEL_NAME=${KERNEL_NAME}"
+            echo "FEATURE_TAG=${FEATURE_TAG}"
+            echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
+            echo "ZIP_NAME=${ZIP_NAME}"
+          } >> "${GITHUB_ENV}"
 
 # Cache the extracted AOSP Clang/LLVM toolchain by revision so future runs skip downloading it
       - name: Cache AOSP Clang/LLVM toolchain
