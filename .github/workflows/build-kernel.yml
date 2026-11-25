@@ -743,14 +743,10 @@ jobs:
           test -s "${RUNNER_TEMP}/AnyKernel3/Image.gz"
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
-          (
-            cd "${RUNNER_TEMP}/AnyKernel3"
-            zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" . -x '*.git*' 'README.md' '*placeholder'
-          )
-          ls -lh "${GITHUB_WORKSPACE}/artifacts/"
-
+          ls -lh "${GITHUB_WORKSPACE}/artifacts"
+          
       # Upload the AnyKernel3 zip, raw Image, Image.gz, and build log as a workflow artifact
-        - name: Upload flashable kernel zip
+      - name: Upload flashable kernel zip
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
