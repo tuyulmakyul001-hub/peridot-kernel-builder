@@ -93,8 +93,18 @@ on:
         required: false
         type: boolean
         default: false
-      enable_nethunter_usb:
-        description: "Enable GKI-safe NetHunter USB support (Gadget RNDIS/OBEX/HID, USB Serial/Ethernet)"
+      enable_mglru:
+        description: "Enable Multi-Gen LRU (MGLRU) at boot (skips if already set in source)"
+        required: false
+        type: boolean
+        default: true
+      enable_cpu_tune:
+        description: "Tune compiler for SM8635 (-mtune=cortex-a720, requires Clang 18+)"
+        required: false
+        type: boolean
+        default: true
+      enable_full_lto:
+        description: "Switch ThinLTO to Full Clang LTO (skips if already Full LTO in source)"
         required: false
         type: boolean
         default: false
@@ -188,6 +198,9 @@ jobs:
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
+          ENABLE_MGLRU: ${{ inputs.enable_mglru }}
+          ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
+          ENABLE_FULL_LTO: ${{ inputs.enable_full_lto }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
@@ -236,7 +249,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-flto-${ENABLE_FULL_LTO}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -298,6 +311,7 @@ jobs:
         env:
           OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
           ENABLE_MLGO: ${{ inputs.enable_mlgo }}
+          ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
         run: |
           set -euxo pipefail
           EXTRA_KCFLAGS=""
@@ -316,7 +330,16 @@ jobs:
               cat "${RUNNER_TEMP}/mlgo_probe.err"
             fi
           fi
-
+          if [ "${ENABLE_CPU_TUNE}" = "true" ]; then
+            if printf 'int tune_probe(int a, int b) { return a + b; }\n' \
+              | clang --target=aarch64-linux-gnu -O2 -mtune=cortex-a720 -x c -c - -o /dev/null 2>"${RUNNER_TEMP}/tune_probe.err"; then
+              EXTRA_KCFLAGS="${EXTRA_KCFLAGS} -mtune=cortex-a720"
+              echo "SM8635 tuning (-mtune=cortex-a720) is supported by clang-${CLANG_VERSION} and has been enabled."
+            else
+              echo "::warning::clang-${CLANG_VERSION} does not support -mtune=cortex-a720 (requires Clang 18+); skipping CPU tune."
+              cat "${RUNNER_TEMP}/tune_probe.err"
+            fi
+          fi
           EXTRA_KCFLAGS="${EXTRA_KCFLAGS# }"
           echo "Effective EXTRA_KCFLAGS='${EXTRA_KCFLAGS}'"
           echo "EXTRA_KCFLAGS=${EXTRA_KCFLAGS}" >> "${GITHUB_ENV}"
@@ -541,6 +564,8 @@ jobs:
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
+          ENABLE_MGLRU: ${{ inputs.enable_mglru }}
+          ENABLE_FULL_LTO: ${{ inputs.enable_full_lto }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -690,7 +715,38 @@ jobs:
           fi
 
           # Resolve all Kconfig dependencies
+          # Multi-Gen LRU (MGLRU) enabled at boot (skip if already set in source)
+          if [ "${ENABLE_MGLRU}" = "true" ]; then
+            for sym in LRU_GEN LRU_GEN_ENABLED; do
+              if grep -qE "^CONFIG_${sym}=y$" out/.config; then
+                echo "Skipping CONFIG_${sym}: already enabled in source config."
+              else
+                echo "Applying MGLRU tweak: CONFIG_${sym}=y"
+                ./scripts/config --file out/.config -e "${sym}"
+              fi
+            done
+          fi
+
+          # Full Clang LTO (skip if already enabled in source)
+          if [ "${ENABLE_FULL_LTO}" = "true" ]; then
+            if grep -qE '^CONFIG_LTO_CLANG_FULL=y$' out/.config; then
+              echo "Skipping CONFIG_LTO_CLANG_FULL: already enabled in source config."
+            else
+              echo "Applying Full Clang LTO: disabling ThinLTO and enabling Full LTO"
+              ./scripts/config --file out/.config \
+                -d LTO_CLANG_THIN \
+                -e LTO_CLANG_FULL
+            fi
+          fi
           make "${MAKE_ARGS[@]}" olddefconfig
+          if [ "${ENABLE_MGLRU}" = "true" ]; then
+            grep -qx 'CONFIG_LRU_GEN=y' out/.config
+            grep -qx 'CONFIG_LRU_GEN_ENABLED=y' out/.config
+          fi
+
+          if [ "${ENABLE_FULL_LTO}" = "true" ]; then
+            grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+          fi
 
           # Strict post-olddefconfig verification (never allow silent drops)
           if [ "${ROOT_VARIANT}" != "none" ]; then
