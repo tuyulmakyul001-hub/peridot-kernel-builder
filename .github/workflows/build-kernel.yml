@@ -17,18 +17,18 @@ on:
         description: "Root integration variant"
         required: true
         type: choice
-        default: "kernelsu-next-susfs"
+        default: "none"
         options:
           - none
           - kernelsu-next
           - kernelsu-next-susfs
-          - sukisu-ultra
-          - sukisu-ultra-susfs
-          - sukisu-ultra-susfs-kpm
+          - sukisu-nova
+          - sukisu-nova-susfs
+          - sukisu-nova-susfs-kpm
           - bakasu
           - bakasu-susfs
       ksu_ref:
-        description: "Optional root repo branch/tag override (blank = variant default)"
+        description: "Optional KernelSU-Next branch or tag (blank = documented default)"
         required: false
         type: string
         default: ""
@@ -93,14 +93,14 @@ on:
         required: false
         type: boolean
         default: false
-      publish_release:
-        description: "Publish flashable zip to GitHub Release"
+      enable_nethunter_usb:
+        description: "Enable GKI-safe NetHunter USB support (Gadget RNDIS/OBEX/HID, USB Serial/Ethernet)"
         required: false
         type: boolean
-        default: true
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-kernel:
@@ -158,7 +158,7 @@ jobs:
           path: builder
           fetch-depth: 1
 
-      # Shallow-clone your selected public kernel repository and branch
+      # Shallow-clone your public kernel fork on the selected LineageOS 24.0 branch
       - name: Clone kernel source
         env:
           KERNEL_REPO: ${{ inputs.kernel_repo }}
@@ -176,8 +176,6 @@ jobs:
       # Verify kernel version (6.1), required config files, Clang version (or override), and output naming metadata
       - name: Inspect kernel tree and compute build metadata
         env:
-          KERNEL_REPO: ${{ inputs.kernel_repo }}
-          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
           ROOT_VARIANT: ${{ inputs.root_variant }}
           RAW_LOCAL_VERSION: ${{ inputs.local_version }}
           RAW_CLANG_VERSION: ${{ inputs.clang_version }}
@@ -190,6 +188,7 @@ jobs:
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
+          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -197,8 +196,7 @@ jobs:
           VERSION="$(awk -F '=' '/^VERSION[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
           PATCHLEVEL="$(awk -F '=' '/^PATCHLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
           SUBLEVEL="$(awk -F '=' '/^SUBLEVEL[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)"
-          KERNEL_VERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
-          echo "Detected kernel version: ${KERNEL_VERSION}"
+          echo "Detected kernel version: ${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
           test "${VERSION}" = "6"
           test "${PATCHLEVEL}" = "1"
 
@@ -238,50 +236,21 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          SOURCE_TAG="$(printf '%s-%s' "${KERNEL_REPO}" "${KERNEL_BRANCH}" | tr -c 'A-Za-z0-9._-' '-')"
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}"
-
-          case "${ROOT_VARIANT}" in
-            none)                   ROOT_TAG="stock" ;;
-            kernelsu-next)          ROOT_TAG="KSUN" ;;
-            kernelsu-next-susfs)    ROOT_TAG="KSUN-SUSFS" ;;
-            sukisu-ultra)           ROOT_TAG="SukiSU" ;;
-            sukisu-ultra-susfs)     ROOT_TAG="SukiSU-SUSFS" ;;
-            sukisu-ultra-susfs-kpm) ROOT_TAG="SukiSU-SUSFS-KPM" ;;
-            bakasu)                 ROOT_TAG="BakaSU" ;;
-            bakasu-susfs)           ROOT_TAG="BakaSU-SUSFS" ;;
-            *)                      ROOT_TAG="${ROOT_VARIANT}" ;;
-          esac
-
-          FEAT_TAGS=""
-          if [ "${TCP_CONGESTION}" = "bbr" ]; then FEAT_TAGS="${FEAT_TAGS}-BBR"; fi
-          if [ "${OPTIMIZE_LEVEL}" = "O3" ]; then FEAT_TAGS="${FEAT_TAGS}-O3"; fi
-          if [ "${ENABLE_MLGO}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-MLGO"; fi
-          if [ "${ENABLE_ADIOS}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-ADIOS"; fi
-          if [ "${ENABLE_BORE}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-BORE"; fi
-          if [ "${ENABLE_BASEBAND_GUARD}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-BBG"; fi
-          if [ "${ENABLE_DROIDSPACES}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-DS"; fi
-          if [ "${ENABLE_UNICODE_FIX}" = "true" ]; then FEAT_TAGS="${FEAT_TAGS}-UNI"; fi
-
-          ARTIFACT_NAME="${KERNEL_NAME}-${KERNEL_VERSION}-${ROOT_TAG}${FEAT_TAGS}-${BUILD_DATE}-${SHORT_COMMIT}"
-          ZIP_NAME="${ARTIFACT_NAME}.zip"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-nhusb-${ENABLE_NETHUNTER_USB}"
+          ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
-            echo "KERNEL_REPO=${KERNEL_REPO}"
-            echo "KERNEL_BRANCH=${KERNEL_BRANCH}"
-            echo "SOURCE_TAG=${SOURCE_TAG}"
-            echo "KERNEL_VERSION=${KERNEL_VERSION}"
+            echo "KERNEL_VERSION=${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
             echo "CLANG_VERSION=${CLANG_VERSION}"
             echo "SHORT_COMMIT=${SHORT_COMMIT}"
             echo "BUILD_DATE=${BUILD_DATE}"
             echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
             echo "KERNEL_NAME=${KERNEL_NAME}"
             echo "FEATURE_TAG=${FEATURE_TAG}"
-            echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-      # Cache the extracted AOSP Clang/LLVM toolchain by revision so future runs skip downloading it
+# Cache the extracted AOSP Clang/LLVM toolchain by revision so future runs skip downloading it
       - name: Cache AOSP Clang/LLVM toolchain
         id: cache-clang
         uses: actions/cache@v5
@@ -357,11 +326,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.ccache
-          key: ccache-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
+          key: ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
           restore-keys: |
-            ccache-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
-            ccache-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-${{ inputs.root_variant }}-
-            ccache-${{ env.SOURCE_TAG }}-${{ env.CLANG_VERSION }}-
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
+            ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
 
       # Set ccache size limits and zero out per-run statistics
       - name: Configure ccache
@@ -371,7 +340,7 @@ jobs:
           ccache --set-config=compression=true
           ccache -z
 
-      # Integrate selected root solution (KernelSU-Next, SukiSU-Ultra, or BakaSU)
+      # Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
       - name: Integrate root solution
         if: ${{ inputs.root_variant != 'none' }}
         env:
@@ -399,12 +368,19 @@ jobs:
                 -o "${RUNNER_TEMP}/ksun-susfs-setup.sh"
               bash "${RUNNER_TEMP}/ksun-susfs-setup.sh" "${REF}"
               ;;
-            sukisu-ultra|sukisu-ultra-susfs|sukisu-ultra-susfs-kpm)
+            sukisu-nova)
+              REF="${KSU_REF:-main}"
+              curl -fLSs \
+                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
+                -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
+              bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
+              ;;
+            sukisu-nova-susfs|sukisu-nova-susfs-kpm)
               REF="${KSU_REF:-builtin}"
               curl -fLSs \
-                "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-                -o "${RUNNER_TEMP}/sukisu-setup.sh"
-              bash "${RUNNER_TEMP}/sukisu-setup.sh" "${REF}"
+                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
+                -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
+              bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
               ;;
             bakasu|bakasu-susfs)
               curl -fLSs \
@@ -564,6 +540,7 @@ jobs:
           ENABLE_BORE: ${{ inputs.enable_bore }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
+          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -612,12 +589,12 @@ jobs:
                 ;;
             esac
 
-            if [ "${ROOT_VARIANT}" = "sukisu-ultra-susfs-kpm" ]; then
+            if [ "${ROOT_VARIANT}" = "sukisu-nova-susfs-kpm" ]; then
               ./scripts/config --file out/.config \
                 -e KPM \
                 -e KALLSYMS \
                 -e KALLSYMS_ALL
-            elif [[ "${ROOT_VARIANT}" == sukisu-ultra* ]]; then
+            elif [[ "${ROOT_VARIANT}" == sukisu-nova* ]]; then
               ./scripts/config --file out/.config -d KPM
             fi
           fi
@@ -681,6 +658,37 @@ jobs:
               -e TMPFS_XATTR
           fi
 
+          # GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
+          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
+            ./scripts/config --file out/.config \
+              -e USB_ACM \
+              -e USB_CONFIGFS_SERIAL \
+              -e USB_CONFIGFS_ACM \
+              -e USB_CONFIGFS_OBEX \
+              -e USB_CONFIGFS_NCM \
+              -e USB_CONFIGFS_ECM \
+              -e USB_CONFIGFS_ECM_SUBSET \
+              -e USB_CONFIGFS_RNDIS \
+              -e USB_CONFIGFS_EEM \
+              -e USB_CONFIGFS_MASS_STORAGE \
+              -e USB_CONFIGFS_F_HID \
+              -e USB_SERIAL \
+              -e USB_SERIAL_GENERIC \
+              -e USB_SERIAL_CP210X \
+              -e USB_SERIAL_FTDI_SIO \
+              -e USB_SERIAL_PL2303 \
+              -e USB_SERIAL_CH341 \
+              -e USB_NET_DRIVERS \
+              -e USB_USBNET \
+              -e USB_RTL8150 \
+              -e USB_RTL8152 \
+              -e USB_LAN78XX \
+              -e USB_NET_AX8817X \
+              -e USB_NET_AX88179_178A \
+              -e USB_NET_CDCETHER \
+              -e USB_NET_RNDIS_HOST
+          fi
+
           # Resolve all Kconfig dependencies
           make "${MAKE_ARGS[@]}" olddefconfig
 
@@ -693,7 +701,7 @@ jobs:
               grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
               ;;
           esac
-          if [ "${ROOT_VARIANT}" = "sukisu-ultra-susfs-kpm" ]; then
+          if [ "${ROOT_VARIANT}" = "sukisu-nova-susfs-kpm" ]; then
             grep -qx 'CONFIG_KPM=y' out/.config
           fi
 
@@ -725,6 +733,14 @@ jobs:
             grep -qx 'CONFIG_DEVTMPFS=y' out/.config
           fi
 
+          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
+            grep -qx 'CONFIG_USB_CONFIGFS_RNDIS=y' out/.config
+            grep -qx 'CONFIG_USB_CONFIGFS_OBEX=y' out/.config
+            grep -qx 'CONFIG_USB_CONFIGFS_F_HID=y' out/.config
+            grep -qx 'CONFIG_USB_SERIAL=y' out/.config
+            grep -qx 'CONFIG_USB_USBNET=y' out/.config
+          fi
+
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
       - name: Build kernel Image
         run: |
@@ -751,17 +767,17 @@ jobs:
           test -s out/arch/arm64/boot/Image
           ccache -s
 
-      # Apply SukiSU-Ultra KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
-      - name: Patch kernel Image for KPM (SukiSU-Ultra)
-        if: ${{ inputs.root_variant == 'sukisu-ultra-susfs-kpm' }}
+      # Apply SukiSU-Nova KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
+      - name: Patch kernel Image for KPM (SukiSU-Nova)
+        if: ${{ inputs.root_variant == 'sukisu-nova-susfs-kpm' }}
         run: |
           set -euxo pipefail
           cd kernel/out/arch/arm64/boot
           if ! curl -fSL --retry 3 --retry-delay 5 \
-            "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
+            "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
             -o patch_linux; then
             curl -fSL --retry 3 --retry-delay 5 \
-              "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" \
+              "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" \
               -o patch_linux
           fi
           chmod +x patch_linux
@@ -777,7 +793,6 @@ jobs:
           ROOT_VARIANT: ${{ inputs.root_variant }}
         run: |
           set -euxo pipefail
-          rm -rf "${RUNNER_TEMP}/AnyKernel3" "${RUNNER_TEMP}/AnyKernel3-arm64-tools" "${GITHUB_WORKSPACE}/artifacts"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3"
           git clone --depth=1 --single-branch -b arm64-tools https://github.com/osm0sis/AnyKernel3.git "${RUNNER_TEMP}/AnyKernel3-arm64-tools"
 
@@ -812,41 +827,24 @@ jobs:
           cp -v "${GITHUB_WORKSPACE}/builder/anykernel3/anykernel.sh" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
           sed -i "s|__KERNEL_STRING__|${KERNEL_STRING}|g" "${RUNNER_TEMP}/AnyKernel3/anykernel.sh"
 
-          # Compress raw (or KPM-patched) Image to Image.gz for AnyKernel3
+          # Compress raw Image to Image.gz for AnyKernel3
           gzip -n -9 -c kernel/out/arch/arm64/boot/Image > "${RUNNER_TEMP}/AnyKernel3/Image.gz"
           test -s "${RUNNER_TEMP}/AnyKernel3/Image.gz"
 
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
           (cd "${RUNNER_TEMP}/AnyKernel3" && zip -r9 "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}" .)
-          test -s "${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}"
+          cp -v kernel/out/arch/arm64/boot/Image "${GITHUB_WORKSPACE}/artifacts/Image"
+          cp -v "${RUNNER_TEMP}/AnyKernel3/Image.gz" "${GITHUB_WORKSPACE}/artifacts/Image.gz"
+          cp -v "${GITHUB_WORKSPACE}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log"
           ls -lh "${GITHUB_WORKSPACE}/artifacts"
 
-      # Publish the single flashable AnyKernel3 zip directly to a GitHub Release when publish_release is checked
-      - name: Publish flashable kernel zip to GitHub Release
-        if: ${{ inputs.publish_release }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-          ZIP_PATH="${GITHUB_WORKSPACE}/artifacts/${ZIP_NAME}"
-          test -s "${ZIP_PATH}"
-          RELEASE_TAG="${BUILD_DATE}-${SHORT_COMMIT}-r${GITHUB_RUN_NUMBER}"
-          gh release create "${RELEASE_TAG}" "${ZIP_PATH}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
-            --title "${ARTIFACT_NAME}" \
-            --notes "POCO F6 (peridot) kernel ${KERNEL_VERSION} from ${KERNEL_REPO}@${KERNEL_BRANCH} (${SHORT_COMMIT}), built with Clang ${CLANG_VERSION}. Root: ${{ inputs.root_variant }}. Flags: ${FEATURE_TAG}"
-
-      # Upload only the flashable AnyKernel3 zip as a workflow artifact on test-only runs
-      - name: Upload flashable kernel zip (test-only artifact)
-        if: ${{ !inputs.publish_release }}
+      # Upload the AnyKernel3 zip, raw Image, Image.gz, and build log as a workflow artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ github.workspace }}/artifacts/${{ env.ZIP_NAME }}
-          compression-level: 0
+          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
+          path: artifacts/
           if-no-files-found: error
-          retention-days: 14
 
       # Upload the build log on failure so compilation errors can still be downloaded
       - name: Upload build log on failure
