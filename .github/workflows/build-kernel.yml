@@ -773,18 +773,18 @@ jobs:
         run: |
           set -euxo pipefail
           cd kernel/out/arch/arm64/boot
-          if ! curl -fSL --retry 3 --retry-delay 5 \
-            "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
-            -o patch_linux; then
-            curl -fSL --retry 3 --retry-delay 5 \
-              "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" \
-              -o patch_linux
-          fi
-          chmod +x patch_linux
-          ./patch_linux
+          curl -fSL --retry 3 --retry-delay 5 \
+            "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU_patch/main/kpm/kptools-linux" \
+            -o kptools-linux
+          curl -fSL --retry 3 --retry-delay 5 \
+            "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU_patch/main/kpm/kpimg" \
+            -o kpimg
+          chmod +x kptools-linux
+          ./kptools-linux -p -i Image -k kpimg -o oImage 2>&1 | tee kpm_patch.log
           test -s oImage
+          grep -qE 'kpimg version:[[:space:]]*[1-9a-fA-F]' kpm_patch.log
           mv -f oImage Image
-          rm -f patch_linux
+          rm -f kptools-linux kpimg kpm_patch.log
           ls -lh Image
 
       # Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
