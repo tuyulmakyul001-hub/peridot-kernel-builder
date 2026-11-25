@@ -103,11 +103,6 @@ on:
         required: false
         type: boolean
         default: true
-      enable_full_lto:
-        description: "Switch ThinLTO to Full Clang LTO (skips if already Full LTO in source)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -200,7 +195,6 @@ jobs:
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
           ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
-          ENABLE_FULL_LTO: ${{ inputs.enable_full_lto }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
         run: |
           set -euxo pipefail
@@ -249,7 +243,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-flto-${ENABLE_FULL_LTO}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -565,7 +559,6 @@ jobs:
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
-          ENABLE_FULL_LTO: ${{ inputs.enable_full_lto }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -727,25 +720,20 @@ jobs:
             done
           fi
 
-          # Full Clang LTO (skip if already enabled in source)
-          if [ "${ENABLE_FULL_LTO}" = "true" ]; then
-            if grep -qE '^CONFIG_LTO_CLANG_FULL=y$' out/.config; then
-              echo "Skipping CONFIG_LTO_CLANG_FULL: already enabled in source config."
-            else
-              echo "Applying Full Clang LTO: disabling ThinLTO and enabling Full LTO"
-              ./scripts/config --file out/.config \
-                -d LTO_CLANG_THIN \
-                -e LTO_CLANG_FULL
-            fi
+          # Ensure ThinLTO is active (prevents runner OOM if a kernel fork defaults to Full LTO)
+          if grep -qE '^CONFIG_LTO_CLANG_THIN=y$' out/.config; then
+            echo "CONFIG_LTO_CLANG_THIN=y already enabled in source config."
+          else
+            echo "Forcing ThinLTO (CONFIG_LTO_CLANG_THIN=y)"
+            ./scripts/config --file out/.config \
+              -d LTO_NONE \
+              -d LTO_CLANG_FULL \
+              -e LTO_CLANG_THIN
           fi
           make "${MAKE_ARGS[@]}" olddefconfig
           if [ "${ENABLE_MGLRU}" = "true" ]; then
             grep -qx 'CONFIG_LRU_GEN=y' out/.config
             grep -qx 'CONFIG_LRU_GEN_ENABLED=y' out/.config
-          fi
-
-          if [ "${ENABLE_FULL_LTO}" = "true" ]; then
-            grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
           fi
 
           # Strict post-olddefconfig verification (never allow silent drops)
