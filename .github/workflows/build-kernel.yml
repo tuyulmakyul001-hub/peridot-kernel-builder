@@ -340,7 +340,7 @@ jobs:
           ccache --set-config=compression=true
           ccache -z
 
-# Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
+      # Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
       - name: Integrate root solution
         if: ${{ inputs.root_variant != 'none' }}
         env:
@@ -368,10 +368,17 @@ jobs:
                 -o "${RUNNER_TEMP}/ksun-susfs-setup.sh"
               bash "${RUNNER_TEMP}/ksun-susfs-setup.sh" "${REF}"
               ;;
-            sukisu-nova|sukisu-nova-susfs|sukisu-nova-susfs-kpm)
+            sukisu-nova)
+              REF="${KSU_REF:-main}"
+              curl -fLSs \
+                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
+                -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
+              bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
+              ;;
+            sukisu-nova-susfs|sukisu-nova-susfs-kpm)
               REF="${KSU_REF:-builtin}"
               curl -fLSs \
-                "https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh" \
+                "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
                 -o "${RUNNER_TEMP}/sukisu-nova-setup.sh"
               bash "${RUNNER_TEMP}/sukisu-nova-setup.sh" "${REF}"
               ;;
@@ -585,6 +592,8 @@ jobs:
             if [ "${ROOT_VARIANT}" = "sukisu-nova-susfs-kpm" ]; then
               ./scripts/config --file out/.config \
                 -e KPM \
+                -e KALLSYMS \
+                -e KALLSYMS_ALL
             elif [[ "${ROOT_VARIANT}" == sukisu-nova* ]]; then
               ./scripts/config --file out/.config -d KPM
             fi
@@ -758,21 +767,25 @@ jobs:
           test -s out/arch/arm64/boot/Image
           ccache -s
 
-# Apply SukiSU-Nova KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
+      # Apply SukiSU-Nova KPM patch_linux to the compiled arm64 Image before AnyKernel3 packaging
       - name: Patch kernel Image for KPM (SukiSU-Nova)
         if: ${{ inputs.root_variant == 'sukisu-nova-susfs-kpm' }}
         run: |
-           set -euxo pipefail
-           cd kernel/out/arch/arm64/boot
-           curl -fSL --retry 3 --retry-delay 5 \
-             "https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
-             -o patch_linux
-           chmod +x patch_linux
-           ./patch_linux
-           test -s oImage
-           mv -f oImage Image
-           rm -f patch_linux
-           ls -lh Image
+          set -euxo pipefail
+          cd kernel/out/arch/arm64/boot
+          if ! curl -fSL --retry 3 --retry-delay 5 \
+            "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux" \
+            -o patch_linux; then
+            curl -fSL --retry 3 --retry-delay 5 \
+              "https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux" \
+              -o patch_linux
+          fi
+          chmod +x patch_linux
+          ./patch_linux
+          test -s oImage
+          mv -f oImage Image
+          rm -f patch_linux
+          ls -lh Image
 
       # Package Image.gz into an official osm0sis/AnyKernel3 zip with 64-bit arm64 tools for peridot
       - name: Package AnyKernel3 flashable zip
