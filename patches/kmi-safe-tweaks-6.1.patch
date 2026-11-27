@@ -135,3 +135,35 @@ index 5c1eaf55e1277..00db8333f2986 100644
  #define DEF_GC_THREAD_MIN_SLEEP_TIME	30000	/* milliseconds */
  #define DEF_GC_THREAD_MAX_SLEEP_TIME	60000
  #define DEF_GC_THREAD_NOGC_SLEEP_TIME	300000	/* wait 5 min */
+
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index f395528175e74..f202335956920 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -797,6 +797,12 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
+ 		}
+ 	}
+ 
++	if ((strstr(line, "healthd")) || (strstr(line, "logd")) ||
++		 strstr(line, "dashd")) {
++		kfree(buf);
++		return len;
++	}
++
+ 	devkmsg_emit(facility, level, "%s", line);
+ 	kfree(buf);
+ 	return ret;
+
+  diff --git a/kernel/irq/cpuhotplug.c b/kernel/irq/cpuhotplug.c
+index 755346ea98196..81a999db9ed25 100644
+--- a/kernel/irq/cpuhotplug.c
++++ b/kernel/irq/cpuhotplug.c
+@@ -147,7 +147,7 @@ static bool migrate_one_irq(struct irq_desc *desc)
+ 	}
+ 
+ 	if (err) {
+-		pr_warn_ratelimited("IRQ%u: set affinity failed(%d).\n",
++		pr_debug_ratelimited("IRQ%u: set affinity failed(%d).\n",
+ 				    d->irq, err);
+ 		brokeaff = false;
+ 	}
