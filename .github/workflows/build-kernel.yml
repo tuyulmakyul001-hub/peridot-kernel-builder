@@ -470,6 +470,8 @@ jobs:
       # Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
       - name: Apply SUSFS kernel patches (gki-android14-6.1)
         if: ${{ contains(inputs.root_variant, '-susfs') }}
+        env:
+          SUSFS_PATCH_FILE: ${{ runner.temp }}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
@@ -482,8 +484,31 @@ jobs:
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
 
+          # If the kernel fork already merged SUSFS bootconfig spoofing into fs/proc/bootconfig.c,
+          # strip the fs/proc/bootconfig.c diff section from the patch so apply_patch_strict.sh
+          # does not fail on an already-present hunk.
+                    if grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c 2>/dev/null; then
+            echo "Detected SUSFS bootconfig spoofing already present in fs/proc/bootconfig.c; stripping bootconfig.c hunk from SUSFS patch."
+            python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          patch_path = Path(os.environ["SUSFS_PATCH_FILE"])
+          raw = patch_path.read_text(encoding="utf-8", errors="replace")
+          marker = "diff --git a/fs/proc/bootconfig.c b/fs/proc/bootconfig.c\n"
+          idx = raw.find(marker)
+          if idx != -1:
+              next_idx = raw.find("\ndiff --git ", idx + len(marker))
+              if next_idx != -1:
+                  cleaned = raw[:idx] + raw[next_idx + 1:]
+              else:
+                  cleaned = raw[:idx]
+              patch_path.write_text(cleaned, encoding="utf-8", newline="\n")
+          PY
+          fi
+
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" \
-            "${RUNNER_TEMP}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+            "${SUSFS_PATCH_FILE}"
 
           rm -fv \
             android/abi_gki_protected_exports_aarch64 \
