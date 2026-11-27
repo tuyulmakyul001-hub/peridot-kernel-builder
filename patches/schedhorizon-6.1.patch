@@ -11,8 +11,8 @@ Subject: [PATCH] sched/cpufreq: Port schedhorizon governor to Android 6.1 GKI
 ---
  drivers/cpufreq/Kconfig            |  11 +
  kernel/sched/Makefile              |   1 +
- kernel/sched/cpufreq_schedhorizon.c | 963 ++++++++++++++++++++
- 3 files changed, 975 insertions(+)
+ kernel/sched/cpufreq_schedhorizon.c | 971 ++++++++++++++++++++
+ 3 files changed, 983 insertions(+)
  create mode 100644 kernel/sched/cpufreq_schedhorizon.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -39,20 +39,18 @@ diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
 --- a/kernel/sched/Makefile
 +++ b/kernel/sched/Makefile
-@@ -34,6 +34,7 @@ obj-$(CONFIG_SCHED_DEBUG) += debug.o
- obj-$(CONFIG_CGROUP_CPUACCT) += cpuacct.o
- obj-$(CONFIG_CPU_FREQ) += cpufreq.o
- obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
+@@ -32,4 +32,5 @@
+ obj-y += core.o
+ obj-y += fair.o
+ obj-y += build_policy.o
 +obj-$(CONFIG_CPU_FREQ_GOV_SCHEDHORIZON) += cpufreq_schedhorizon.o
- obj-$(CONFIG_MEMBARRIER) += membarrier.o
- obj-$(CONFIG_CPU_ISOLATION) += isolation.o
- obj-$(CONFIG_PSI) += psi.o
+ obj-y += build_utility.o
 diff --git a/kernel/sched/cpufreq_schedhorizon.c b/kernel/sched/cpufreq_schedhorizon.c
 new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/kernel/sched/cpufreq_schedhorizon.c
-@@ -0,0 +1,963 @@
+@@ -0,0 +1,971 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CPUFreq governor based on scheduler-provided CPU utilization data
@@ -66,6 +64,15 @@ index 0000000..1111111
 + */
 +
 +#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/cpufreq.h>
++#include <linux/irq_work.h>
++#include <linux/kobject.h>
++#include <linux/kthread.h>
++#include <linux/math64.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <uapi/linux/sched/types.h>
 +
 +#include "sched.h"
 +
@@ -720,7 +727,7 @@ index 0000000..1111111
 +
 +/********************** cpufreq governor interface *********************/
 +
-+struct cpufreq_governor schedhorizon_gov;
++static struct cpufreq_governor schedhorizon_gov;
 +
 +static struct shz_policy *shz_policy_alloc(struct cpufreq_policy *policy)
 +{
@@ -764,7 +771,6 @@ index 0000000..1111111
 +	if (policy->fast_switch_enabled)
 +		return 0;
 +
-+	trace_android_vh_set_sugov_sched_attr(&attr);
 +	kthread_init_work(&sg_policy->work, shz_work);
 +	kthread_init_worker(&sg_policy->worker);
 +	thread = kthread_create(kthread_worker_fn, &sg_policy->worker,
@@ -997,7 +1003,7 @@ index 0000000..1111111
 +	sg_policy->limits_changed = true;
 +}
 +
-+struct cpufreq_governor schedhorizon_gov = {
++static struct cpufreq_governor schedhorizon_gov = {
 +	.name			= "schedhorizon",
 +	.owner			= THIS_MODULE,
 +	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
