@@ -16,7 +16,6 @@ Subject: [PATCH] sched/cpufreq: Port schedhorizon governor to Android 6.1 GKI
  create mode 100644 kernel/sched/cpufreq_schedhorizon.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
-index 0000000..1111111 100644
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
 @@ -207,6 +207,17 @@ config CPU_FREQ_GOV_SCHEDUTIL
@@ -38,7 +37,6 @@ index 0000000..1111111 100644
  
  config CPUFREQ_DT
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
-index 0000000..1111111 100644
 --- a/kernel/sched/Makefile
 +++ b/kernel/sched/Makefile
 @@ -34,6 +34,7 @@ obj-$(CONFIG_SCHED_DEBUG) += debug.o
