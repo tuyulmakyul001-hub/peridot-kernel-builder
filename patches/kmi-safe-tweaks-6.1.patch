@@ -154,7 +154,7 @@ index f395528175e74..f202335956920 100644
  	kfree(buf);
  	return ret;
 
-  diff --git a/kernel/irq/cpuhotplug.c b/kernel/irq/cpuhotplug.c
+diff --git a/kernel/irq/cpuhotplug.c b/kernel/irq/cpuhotplug.c
 index 755346ea98196..81a999db9ed25 100644
 --- a/kernel/irq/cpuhotplug.c
 +++ b/kernel/irq/cpuhotplug.c
