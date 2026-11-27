@@ -118,7 +118,7 @@ on:
         required: false
         type: boolean
         default: false
-        enable_kyber:
+      enable_kyber:
         description: "Enable Kyber I/O scheduler (discards if already enabled in source)"
         required: false
         type: boolean
@@ -133,7 +133,7 @@ on:
         required: false
         type: boolean
         default: false
-        enable_bbrv3:
+      enable_bbrv3:
         description: "Apply KMI-safe BBRv3 backport on 6.1 (requires patches/bbrv3-6.1-kmi-safe.patch; skips if already in source)"
         required: false
         type: boolean
