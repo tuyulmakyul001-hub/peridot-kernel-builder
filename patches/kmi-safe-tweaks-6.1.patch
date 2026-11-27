@@ -78,7 +78,7 @@ index 1fd5d790ab80..931dd4be6593 100644
   *	x0 - dest
   */
 +	.p2align 4
- SYM_FUNC_START_PI(__pi_clear_page)
+ SYM_FUNC_START(__pi_clear_page)
  	mrs	x1, dczid_el0
  	tbnz	x1, #4, 2f	/* Branch if DC ZVA is prohibited */
 diff --git a/kernel/sched/features.h b/kernel/sched/features.h
