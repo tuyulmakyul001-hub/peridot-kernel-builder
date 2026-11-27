@@ -784,7 +784,11 @@ jobs:
           test -f "${PATCH_PATH}"
 
           cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
+          if patch --batch --reverse --dry-run -p1 -i "${PATCH_PATH}" >/dev/null 2>&1; then
+            echo "Skipping Droidspaces kABI padding patch: already applied in kernel source."
+          else
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
+          fi
 
       # Dry-run and apply the 6.1 Unicode zero-width path bypass fix (gki_ptrace.patch omitted: already fixed in 6.1)
       - name: Apply 6.1 Unicode path bypass fix
@@ -800,7 +804,11 @@ jobs:
           test -f "${UNICODE_PATCH}"
 
           cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
+          if patch --batch --reverse --dry-run -p1 -i "${UNICODE_PATCH}" >/dev/null 2>&1; then
+            echo "Skipping 6.1 Unicode path bypass fix: already applied in kernel source."
+          else
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
+          fi
           # Dry-run and apply local KMI-safe Linux 6.1 BBRv3 patch (discards if BBRv3 is already in source)
       
       - name: Apply KMI-safe BBRv3 patch (6.1)
@@ -832,19 +840,96 @@ jobs:
             echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
           fi
 
-      # Dry-run and apply consolidated KMI-safe power, arm64, sched, and F2FS tweaks (6.1)
+      # Per-file source-aware apply for consolidated KMI-safe tweaks (skips files already applied or customized in fork)
       - name: Apply KMI-safe tweaks patch (6.1)
         if: ${{ inputs.enable_kmi_safe_tweaks }}
+        env:
+          TWEAKS_PATCH: ${{ github.workspace }}/builder/patches/kmi-safe-tweaks-6.1.patch
         run: |
           set -euxo pipefail
-          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          TWEAKS_PATCH="${GITHUB_WORKSPACE}/builder/patches/kmi-safe-tweaks-6.1.patch"
           if [ ! -f "${TWEAKS_PATCH}" ]; then
             echo "::error::Missing patches/kmi-safe-tweaks-6.1.patch in your builder repository."
             exit 1
           fi
           cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${TWEAKS_PATCH}"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re, subprocess, tempfile
+
+          patch_path = Path(os.environ["TWEAKS_PATCH"])
+          raw = patch_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+
+          # Split multi-file patch into individual per-file diff sections
+          starts = [m.start() for m in re.finditer(r"^diff --git ", raw, re.M)]
+          if not starts:
+              raise SystemExit("::error::No 'diff --git' sections found in patches/kmi-safe-tweaks-6.1.patch.")
+
+          sections = []
+          for idx, start in enumerate(starts):
+              end = starts[idx + 1] if idx + 1 < len(starts) else len(raw)
+              chunk = raw[start:end]
+              m_file = re.match(r"^diff --git a/\S+ b/(\S+)", chunk)
+              target = m_file.group(1) if m_file else f"section_{idx + 1}"
+              sections.append((target, chunk))
+
+          applied = []
+          already = []
+          conflicted = []
+
+          for target, chunk in sections:
+              with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as tf:
+                  tf.write(chunk)
+                  tmp = tf.name
+              try:
+                  rev = subprocess.run(
+                      ["patch", "--batch", "--reverse", "--dry-run", "-p1", "-i", tmp],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if rev.returncode == 0:
+                      print(f"SKIPPED (already applied in source): {target}")
+                      already.append(target)
+                      continue
+
+                  fwd = subprocess.run(
+                      ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tmp],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if fwd.returncode == 0:
+                      res = subprocess.run(
+                          ["patch", "--batch", "--forward", "-p1", "-i", tmp],
+                          capture_output=True,
+                          text=True,
+                      )
+                      if res.returncode != 0:
+                          print(res.stdout)
+                          print(res.stderr)
+                          raise SystemExit(f"::error::Patch failed after clean dry-run for {target}")
+                      print(f"APPLIED: {target}")
+                      applied.append(target)
+                  else:
+                      print(f"::warning::SKIPPED (already modified or context conflict in source): {target}")
+                      conflicted.append(target)
+              finally:
+                  os.unlink(tmp)
+
+          total = len(sections)
+          summary = f"Applied {len(applied)}/{total}"
+          details = []
+          if already:
+              details.append(f"{len(already)} already in source")
+          if conflicted:
+              details.append(f"{len(conflicted)} skipped on conflict")
+          if details:
+              summary += " (" + ", ".join(details) + ")"
+          print(f"KMI-safe tweaks summary: {summary}")
+
+          gh_env = os.environ.get("GITHUB_ENV")
+          if gh_env:
+              with open(gh_env, "a", encoding="utf-8") as ef:
+                  ef.write(f"KMI_TWEAKS_STATUS={summary}\n")
+          PY
 
       # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
@@ -1510,7 +1595,7 @@ jobs:
             echo "| **Baseband-guard LSM** | \`${ENABLE_BASEBAND_GUARD}\` | $([ "${ENABLE_BASEBAND_GUARD}" = "true" ] && echo "Applied" || echo "Disabled") | \`CONFIG_BBG\` |"
             echo "| **Droidspaces** | \`${ENABLE_DROIDSPACES}\` | $([ "${ENABLE_DROIDSPACES}" = "true" ] && echo "Applied" || echo "Disabled") | \`SYSVIPC / NS\` |"
             echo "| **Unicode Bypass Fix** | \`${ENABLE_UNICODE_FIX}\` | $([ "${ENABLE_UNICODE_FIX}" = "true" ] && echo "Applied" || echo "Disabled") | \`unicode_bypass_fix_6.1+\` |"
-            echo "| **KMI-Safe Tweaks Pack** | \`${ENABLE_KMI_SAFE_TWEAKS}\` | $([ "${ENABLE_KMI_SAFE_TWEAKS}" = "true" ] && echo "Applied" || echo "Disabled") | \`kmi-safe-tweaks-6.1.patch\` |"
+            echo "| **KMI-Safe Tweaks Pack** | \`${ENABLE_KMI_SAFE_TWEAKS}\` | $([ "${ENABLE_KMI_SAFE_TWEAKS}" = "true" ] && echo "${KMI_TWEAKS_STATUS:-Applied}" || echo "Disabled") | \`kmi-safe-tweaks-6.1.patch\` |"
             echo ""
             echo "### Artifact SHA-256 Checksums"
             echo ""
