@@ -487,7 +487,7 @@ jobs:
           # If the kernel fork already merged SUSFS bootconfig spoofing into fs/proc/bootconfig.c,
           # strip the fs/proc/bootconfig.c diff section from the patch so apply_patch_strict.sh
           # does not fail on an already-present hunk.
-                    if grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c 2>/dev/null; then
+          if grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c 2>/dev/null; then
             echo "Detected SUSFS bootconfig spoofing already present in fs/proc/bootconfig.c; stripping bootconfig.c hunk from SUSFS patch."
             python3 - <<'PY'
           from pathlib import Path
@@ -881,16 +881,20 @@ jobs:
 
           # Fair Queue (fq) default network qdisc (discard if already applied in source)
           if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then
-            if grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
+            if grep -qx 'CONFIG_NET_SCH_DEFAULT=y' out/.config && grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
               echo "Skipping FQ default qdisc: already set to fq in source config."
             else
-              echo "Applying FQ default qdisc tweak: CONFIG_NET_SCH_FQ=y, CONFIG_DEFAULT_FQ=y"
+              echo "Applying FQ default qdisc tweak: CONFIG_NET_SCH_DEFAULT=y, CONFIG_NET_SCH_FQ=y, CONFIG_DEFAULT_FQ=y"
               ./scripts/config --file out/.config \
                 -e NET_SCHED \
+                -e NET_SCH_DEFAULT \
                 -e NET_SCH_FQ \
+                -d DEFAULT_CODEL \
                 -d DEFAULT_FQ_CODEL \
+                -d DEFAULT_FQ_PIE \
                 -d DEFAULT_PFIFO_FAST \
                 -d DEFAULT_SFQ \
+                -d DEFAULT_CAKE \
                 -e DEFAULT_FQ \
                 --set-str DEFAULT_NET_SCH fq
             fi
