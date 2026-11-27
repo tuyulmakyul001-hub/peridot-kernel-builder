@@ -143,6 +143,11 @@ on:
         required: false
         type: boolean
         default: true
+      enable_schedhorizon:
+        description: "Apply local Schedhorizon CPU governor patch (requires patches/schedhorizon-6.1.patch; skips if already in source)"
+        required: false
+        type: boolean
+        default: false  
 
 permissions:
   contents: read
@@ -244,6 +249,7 @@ jobs:
           ENABLE_CPQ: ${{ inputs.enable_cpq }}
           ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
           ENABLE_CAKE: ${{ inputs.enable_cake }}
+          ENABLE_SCHEDHORIZON: ${{ inputs.enable_schedhorizon }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -291,7 +297,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-fq-${ENABLE_FQ_DEFAULT}-hz300-${ENABLE_HZ_300}-kyb-${ENABLE_KYBER}-bfq-${ENABLE_BFQ}-cpq-${ENABLE_CPQ}-bbr3-${ENABLE_BBRV3}-cake-${ENABLE_CAKE}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-fq-${ENABLE_FQ_DEFAULT}-hz300-${ENABLE_HZ_300}-kyb-${ENABLE_KYBER}-bfq-${ENABLE_BFQ}-cpq-${ENABLE_CPQ}-bbr3-${ENABLE_BBRV3}-cake-${ENABLE_CAKE}-ond-${ENABLE_GOV_ONDEMAND}-usrgov-${ENABLE_GOV_USERSPACE}-shz-${ENABLE_SCHEDHORIZON}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -675,6 +681,34 @@ jobs:
             echo "BBRV3_DEFAULT_SYM=DEFAULT_BBR" >> "${GITHUB_ENV}"
             echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
           fi
+          # Dry-run and apply local Linux 6.1 Schedhorizon governor patch (discards if already in source)
+      - name: Apply Schedhorizon CPU governor patch (6.1)
+        if: ${{ inputs.enable_schedhorizon }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          cd kernel
+
+          if grep -qE '^config[[:space:]]+(CPU_FREQ_GOV_)?SCHEDHORIZON$' drivers/cpufreq/Kconfig* kernel/sched/Kconfig* 2>/dev/null \
+            || compgen -G 'kernel/sched/*schedhorizon*.c' >/dev/null \
+            || compgen -G 'drivers/cpufreq/*schedhorizon*.c' >/dev/null; then
+            echo "Discarding Schedhorizon patch: Schedhorizon governor is already present in kernel source."
+          else
+            SHZ_PATCH="${GITHUB_WORKSPACE}/builder/patches/schedhorizon-6.1.patch"
+            if [ ! -f "${SHZ_PATCH}" ]; then
+              echo "::error::Missing patches/schedhorizon-6.1.patch in your builder repository. Add a verified Linux 6.1 Schedhorizon patch there before enabling enable_schedhorizon."
+              exit 1
+            fi
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${SHZ_PATCH}"
+          fi
+
+          SHZ_SYM="$(grep -hE '^config[[:space:]]+(CPU_FREQ_GOV_)?SCHEDHORIZON$' drivers/cpufreq/Kconfig* kernel/sched/Kconfig* 2>/dev/null | awk '{print $2; exit}')"
+          if [ -z "${SHZ_SYM}" ]; then
+            echo "::error::Schedhorizon patch applied (or detected), but no CPU_FREQ_GOV_SCHEDHORIZON symbol was found in Kconfig."
+            exit 1
+          fi
+          echo "Detected Schedhorizon Kconfig symbol: ${SHZ_SYM}"
+          echo "SCHEDHORIZON_CONFIG_SYM=${SHZ_SYM}" >> "${GITHUB_ENV}"
 
       # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
@@ -695,6 +729,7 @@ jobs:
           ENABLE_CPQ: ${{ inputs.enable_cpq }}
           ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
           ENABLE_CAKE: ${{ inputs.enable_cake }}
+          ENABLE_SCHEDHORIZON: ${{ inputs.enable_schedhorizon }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -974,6 +1009,16 @@ jobs:
                 -e NET_SCH_CAKE
             fi
           fi
+          
+          # Schedhorizon CPU governor (discard if already enabled in source)
+          if [ "${ENABLE_SCHEDHORIZON}" = "true" ] && [ -n "${SCHEDHORIZON_CONFIG_SYM:-}" ]; then
+            if grep -qE "^CONFIG_${SCHEDHORIZON_CONFIG_SYM}=[ym]$" out/.config; then
+              echo "Discarding Schedhorizon config: CONFIG_${SCHEDHORIZON_CONFIG_SYM} already enabled in source config."
+            else
+              echo "Applying Schedhorizon CPU governor: CONFIG_${SCHEDHORIZON_CONFIG_SYM}=y"
+              ./scripts/config --file out/.config -e "${SCHEDHORIZON_CONFIG_SYM}"
+            fi
+          fi
           make "${MAKE_ARGS[@]}" olddefconfig
           if [ "${ENABLE_MGLRU}" = "true" ]; then
             grep -qx 'CONFIG_LRU_GEN=y' out/.config
@@ -1053,6 +1098,7 @@ jobs:
           if [ "${ENABLE_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             grep -qx "CONFIG_${CPQ_CONFIG_SYM}=y" out/.config
           fi
+          
           if [ "${ENABLE_BBRV3}" = "true" ]; then
             grep -qx "CONFIG_${BBRV3_CONFIG_SYM:-TCP_CONG_BBR}=y" out/.config
             grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBRV3_CONG_NAME:-bbr}\"" out/.config
@@ -1060,6 +1106,10 @@ jobs:
 
           if [ "${ENABLE_CAKE}" = "true" ]; then
             grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config
+          fi
+
+          if [ "${ENABLE_SCHEDHORIZON}" = "true" ] && [ -n "${SCHEDHORIZON_CONFIG_SYM:-}" ]; then
+            grep -qE "^CONFIG_${SCHEDHORIZON_CONFIG_SYM}=[ym]$" out/.config
           fi
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
