@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: POCO F6 6.1 GKI Builder <kernel@peridot.local>
+Date: Fri, 27 Nov 2026 22:16:00 +0700
+Subject: [PATCH] peridot: Consolidated KMI-safe power, arm64, sched, and F2FS tweaks (6.1)
+
+Combines 8 KMI-safe patches from kpatch.zip:
+- PM / wakeup: Avoid excessive s2idle wake attempts
+- alarmtimer: Minimize wakeup time
+- PM / freezer: Reduce freeze timeout to 1s for Android
+- arm64: Align clear_page() to 16 bytes
+- sched/fair: Disable CACHE_HOT_BUDDY for DSU
+- f2fs: Reduce congestion wait timeout to 6ms
+- f2fs: Enlarge DEF_MIN_FSYNC_BLOCKS to 20
+- f2fs/gc: Reduce GC thread urgent sleep time to 50ms
+---
+
+diff --git a/drivers/base/power/wakeup.c b/drivers/base/power/wakeup.c
+index 770bb04b7ed8b..093fad92e8e51 100644
+--- a/drivers/base/power/wakeup.c
++++ b/drivers/base/power/wakeup.c
+@@ -935,8 +935,8 @@ EXPORT_SYMBOL_GPL(pm_wakeup_pending);
+ 
+ void pm_system_wakeup(void)
+ {
+-	atomic_inc(&pm_abort_suspend);
+-	s2idle_wake();
++	if (atomic_inc_return_relaxed(&pm_abort_suspend) == 1)
++		s2idle_wake();
+ }
+ EXPORT_SYMBOL_GPL(pm_system_wakeup);
+ 
+diff --git a/kernel/time/alarmtimer.c b/kernel/time/alarmtimer.c
+index 8d9f13d847f09..0d3dba04e78d8 100644
+--- a/kernel/time/alarmtimer.c
++++ b/kernel/time/alarmtimer.c
+@@ -280,7 +280,7 @@ static int alarmtimer_suspend(struct device *dev)
+ 		return 0;
+ 
+ 	if (ktime_to_ns(min) < 2 * NSEC_PER_SEC) {
+-		pm_wakeup_event(dev, 2 * MSEC_PER_SEC);
++		pm_wakeup_event(dev, ktime_to_ms(min) + 1);
+ 		return -EBUSY;
+ 	}
+ 
+diff --git a/kernel/power/main.c b/kernel/power/main.c
+index a3543bd2d25af..f691f144fe2bd 100644
+--- a/kernel/power/main.c
++++ b/kernel/power/main.c
+@@ -922,6 +922,9 @@ static ssize_t pm_freeze_timeout_store(struct kobject *kobj,
+ {
+ 	unsigned long val;
+ 
++	/* Don't let anything in Android change the freeze timeout */
++	return n;
++
+ 	if (kstrtoul(buf, 10, &val))
+ 		return -EINVAL;
+ 
+diff --git a/kernel/power/process.c b/kernel/power/process.c
+index a22a91b7e3d92..8eda64d0cc36e 100644
+--- a/kernel/power/process.c
++++ b/kernel/power/process.c
+@@ -25,7 +25,7 @@
+ /*
+  * Timeout for stopping processes
+  */
+-unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
++unsigned int __read_mostly freeze_timeout_msecs = MSEC_PER_SEC;
+ 
+ static int try_to_freeze_tasks(bool user_only)
+ {
+diff --git a/arch/arm64/lib/clear_page.S b/arch/arm64/lib/clear_page.S
+index 1fd5d790ab80..931dd4be6593 100644
+--- a/arch/arm64/lib/clear_page.S
++++ b/arch/arm64/lib/clear_page.S
+@@ -14,6 +14,7 @@
+  * Parameters:
+  *	x0 - dest
+  */
++	.p2align 4
+ SYM_FUNC_START_PI(clear_page)
+ 	mrs	x1, dczid_el0
+ 	tbnz	x1, #4, 2f	/* Branch if DC ZVA is prohibited */
+diff --git a/kernel/sched/features.h b/kernel/sched/features.h
+index 980d92bab8abf..866feea517cdf 100644
+--- a/kernel/sched/features.h
++++ b/kernel/sched/features.h
+@@ -44,7 +44,7 @@ SCHED_FEAT(PICK_BUDDY, true)
+  * Consider buddies to be cache hot, decreases the likeliness of a
+  * cache buddy being migrated away, increases cache locality.
+  */
+-SCHED_FEAT(CACHE_HOT_BUDDY, true)
++SCHED_FEAT(CACHE_HOT_BUDDY, false)
+ 
+ /*
+  * Delay dequeueing tasks until they get selected or woken.
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 6e84dcc8c76e5..372080ca29a04 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -596,8 +596,8 @@ enum {
+ 
+ #define DEFAULT_RETRY_IO_COUNT	8	/* maximum retry read IO or flush count */
+ 
+-/* congestion wait timeout value, default: 20ms */
+-#define	DEFAULT_IO_TIMEOUT	(msecs_to_jiffies(20))
++/* congestion wait timeout value, default: 6ms */
++#define	DEFAULT_IO_TIMEOUT	(msecs_to_jiffies(6))
+ 
+ /* maximum retry quota flush count */
+ #define DEFAULT_RETRY_QUOTA_FLUSH_COUNT		8
+diff --git a/fs/f2fs/segment.h b/fs/f2fs/segment.h
+index 07dcbcbeb7c6d..d7576e8246602 100644
+--- a/fs/f2fs/segment.h
++++ b/fs/f2fs/segment.h
+@@ -777,7 +777,7 @@ static inline int utilization(struct f2fs_sb_info *sbi)
+  * F2FS_IPU_DISABLE - disable IPU. (=default option in LFS mode)
+  */
+ #define DEF_MIN_IPU_UTIL	70
+-#define DEF_MIN_FSYNC_BLOCKS	8
++#define DEF_MIN_FSYNC_BLOCKS	20
+ #define DEF_MIN_HOT_BLOCKS	16
+ 
+ #define SMALL_VOLUME_SEGMENTS	(16 * 512)	/* 16GB */
+diff --git a/fs/f2fs/gc.h b/fs/f2fs/gc.h
+index 5c1eaf55e1277..00db8333f2986 100644
+--- a/fs/f2fs/gc.h
++++ b/fs/f2fs/gc.h
+@@ -10,7 +10,7 @@
+ 						 * whether IO subsystem is idle
+ 						 * or not
+ 						 */
+-#define DEF_GC_THREAD_URGENT_SLEEP_TIME	500	/* 500 ms */
++#define DEF_GC_THREAD_URGENT_SLEEP_TIME	50	/* 50 ms */
+ #define DEF_GC_THREAD_MIN_SLEEP_TIME	30000	/* milliseconds */
+ #define DEF_GC_THREAD_MAX_SLEEP_TIME	60000
+ #define DEF_GC_THREAD_NOGC_SLEEP_TIME	300000	/* wait 5 min */
