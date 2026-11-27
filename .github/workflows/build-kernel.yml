@@ -43,13 +43,14 @@ on:
         type: string
         default: ""
       tcp_congestion:
-        description: "Default TCP congestion control (stock or BBR)"
+        description: "Default TCP congestion control (stock, BBR, or KMI-safe BBRv3)"
         required: true
         type: choice
         default: "stock"
         options:
           - stock
           - bbr
+          - bbr3
       optimize_level:
         description: "Compiler optimization level (O2 default or O3)"
         required: true
@@ -63,21 +64,27 @@ on:
         required: false
         type: boolean
         default: true
-      enable_adios:
-        description: "Enable ADIOS I/O scheduler on 6.1 (requires patches/adios-6.1.patch)"
+      io_scheduler:
+        description: "Extra I/O scheduler to integrate/enable (all = ADIOS + CPQ + Kyber + BFQ)"
         required: false
-        type: boolean
-        default: false
-      enable_bore:
-        description: "Apply KMI-safe BORE scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
+        type: choice
+        default: "stock"
+        options:
+          - stock
+          - adios
+          - cpq
+          - kyber
+          - bfq
+          - all
+      bore_scheduler:
+        description: "KMI-safe BORE CPU scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
         required: false
-        type: boolean
-        default: false
-      bore_default_on:
-        description: "Start BORE active at boot (sched_bore=1; applies when BORE is enabled)"
-        required: false
-        type: boolean
-        default: true
+        type: choice
+        default: "off"
+        options:
+          - off
+          - boot-on
+          - boot-off
       enable_baseband_guard:
         description: "Enable Baseband-guard LSM (boot/recovery stay writable)"
         required: false
@@ -108,46 +115,25 @@ on:
         required: false
         type: boolean
         default: true
-      enable_fq_default:
-        description: "Set Fair Queue (fq) as default network qdisc (skips if already set in source)"
+      net_qdisc:
+        description: "Network qdisc config (fq = FQ default; fq-cake = FQ default + CAKE available)"
         required: false
-        type: boolean
-        default: true
+        type: choice
+        default: "fq-cake"
+        options:
+          - stock
+          - fq
+          - fq-cake
       enable_hz_300:
         description: "Set kernel timer tick to 300 Hz for 60/120 Hz pacing (skips if already 300 Hz)"
         required: false
         type: boolean
         default: false
-      enable_kyber:
-        description: "Enable Kyber I/O scheduler (discards if already enabled in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_bfq:
-        description: "Enable BFQ I/O scheduler (discards if already enabled in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_cpq:
-        description: "Integrate CPQ I/O scheduler from Rasenkai/CPQ_IOSched (discards if already in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_bbrv3:
-        description: "Apply KMI-safe BBRv3 backport on 6.1 (requires patches/bbrv3-6.1-kmi-safe.patch; skips if already in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_cake:
-        description: "Enable CAKE network qdisc (CONFIG_NET_SCH_CAKE; skips if already in source)"
-        required: false
-        type: boolean
-        default: true
       enable_schedhorizon:
         description: "Apply local Schedhorizon CPU governor patch (requires patches/schedhorizon-6.1.patch; skips if already in source)"
         required: false
         type: boolean
-        default: false  
+        default: false
 
 permissions:
   contents: read
@@ -232,23 +218,16 @@ jobs:
           TCP_CONGESTION: ${{ inputs.tcp_congestion }}
           OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
           ENABLE_MLGO: ${{ inputs.enable_mlgo }}
-          ENABLE_ADIOS: ${{ inputs.enable_adios }}
-          ENABLE_BORE: ${{ inputs.enable_bore }}
-          BORE_DEFAULT_ON: ${{ inputs.bore_default_on }}
+          IO_SCHEDULER: ${{ inputs.io_scheduler }}
+          BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
           ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
-          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
-          ENABLE_FQ_DEFAULT: ${{ inputs.enable_fq_default }}
+          NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
-          ENABLE_KYBER: ${{ inputs.enable_kyber }}
-          ENABLE_BFQ: ${{ inputs.enable_bfq }}
-          ENABLE_CPQ: ${{ inputs.enable_cpq }}
-          ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
-          ENABLE_CAKE: ${{ inputs.enable_cake }}
           ENABLE_SCHEDHORIZON: ${{ inputs.enable_schedhorizon }}
         run: |
           set -euxo pipefail
@@ -297,7 +276,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-fq-${ENABLE_FQ_DEFAULT}-hz300-${ENABLE_HZ_300}-kyb-${ENABLE_KYBER}-bfq-${ENABLE_BFQ}-cpq-${ENABLE_CPQ}-bbr3-${ENABLE_BBRV3}-cake-${ENABLE_CAKE}-ond-${ENABLE_GOV_ONDEMAND}-usrgov-${ENABLE_GOV_USERSPACE}-shz-${ENABLE_SCHEDHORIZON}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-shz-${ENABLE_SCHEDHORIZON}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -495,13 +474,13 @@ jobs:
 
       # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch
       - name: Apply ADIOS I/O scheduler patch (6.1)
-        if: ${{ inputs.enable_adios }}
+        if: ${{ inputs.io_scheduler == 'adios' || inputs.io_scheduler == 'all' }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
           ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
           if [ ! -f "${ADIOS_PATCH}" ]; then
-            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before enabling enable_adios."
+            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before selecting io_scheduler=adios or all."
             exit 1
           fi
 
@@ -518,7 +497,7 @@ jobs:
       
       # Integrate CPQ I/O scheduler (Rasenkai/CPQ_IOSched) only if not already present in kernel source
       - name: Integrate CPQ I/O scheduler (6.1)
-        if: ${{ inputs.enable_cpq }}
+        if: ${{ inputs.io_scheduler == 'cpq' || inputs.io_scheduler == 'all' }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -568,9 +547,9 @@ jobs:
 
       # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
       - name: Apply KMI-safe BORE scheduler patch (6.1)
-        if: ${{ inputs.enable_bore }}
+        if: ${{ inputs.bore_scheduler != 'off' }}
         env:
-          BORE_DEFAULT_ON: ${{ inputs.bore_default_on }}
+          BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
@@ -592,7 +571,7 @@ jobs:
           echo "BORE_CONFIG_SYM=${BORE_SYM}" >> "${GITHUB_ENV}"
 
           DESIRED_BORE_VAL="1"
-          if [ "${BORE_DEFAULT_ON}" != "true" ]; then
+          if [ "${BORE_SCHEDULER}" != "boot-on" ]; then
             DESIRED_BORE_VAL="0"
           fi
 
@@ -654,7 +633,7 @@ jobs:
           # Dry-run and apply local KMI-safe Linux 6.1 BBRv3 patch (discards if BBRv3 is already in source)
       
       - name: Apply KMI-safe BBRv3 patch (6.1)
-        if: ${{ inputs.enable_bbrv3 }}
+        if: ${{ inputs.tcp_congestion == 'bbr3' }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
@@ -715,20 +694,14 @@ jobs:
         env:
           ROOT_VARIANT: ${{ inputs.root_variant }}
           TCP_CONGESTION: ${{ inputs.tcp_congestion }}
-          ENABLE_ADIOS: ${{ inputs.enable_adios }}
-          ENABLE_BORE: ${{ inputs.enable_bore }}
+          IO_SCHEDULER: ${{ inputs.io_scheduler }}
+          BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
           ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
-          ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
-          ENABLE_FQ_DEFAULT: ${{ inputs.enable_fq_default }}
+          NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
-          ENABLE_KYBER: ${{ inputs.enable_kyber }}
-          ENABLE_BFQ: ${{ inputs.enable_bfq }}
-          ENABLE_CPQ: ${{ inputs.enable_cpq }}
-          ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
-          ENABLE_CAKE: ${{ inputs.enable_cake }}
           ENABLE_SCHEDHORIZON: ${{ inputs.enable_schedhorizon }}
         run: |
           set -euxo pipefail
@@ -801,12 +774,12 @@ jobs:
           fi
 
           # ADIOS I/O scheduler
-          if [ "${ENABLE_ADIOS}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             ./scripts/config --file out/.config -e "${ADIOS_CONFIG_SYM}"
           fi
 
           # BORE CPU scheduler
-          if [ "${ENABLE_BORE}" = "true" ]; then
+          if [ "${BORE_SCHEDULER}" != "off" ]; then
             ./scripts/config --file out/.config -e "${BORE_CONFIG_SYM}"
           fi
 
@@ -845,37 +818,6 @@ jobs:
               -e NETFILTER_XT_SET \
               -e TMPFS_POSIX_ACL \
               -e TMPFS_XATTR
-          fi
-
-          # GKI-safe Kali NetHunter USB subset (no built-in BT/NFC/CAN/DVB to protect vendor_dlkm)
-          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -e USB_ACM \
-              -e USB_CONFIGFS_SERIAL \
-              -e USB_CONFIGFS_ACM \
-              -e USB_CONFIGFS_OBEX \
-              -e USB_CONFIGFS_NCM \
-              -e USB_CONFIGFS_ECM \
-              -e USB_CONFIGFS_ECM_SUBSET \
-              -e USB_CONFIGFS_RNDIS \
-              -e USB_CONFIGFS_EEM \
-              -e USB_CONFIGFS_MASS_STORAGE \
-              -e USB_CONFIGFS_F_HID \
-              -e USB_SERIAL \
-              -e USB_SERIAL_GENERIC \
-              -e USB_SERIAL_CP210X \
-              -e USB_SERIAL_FTDI_SIO \
-              -e USB_SERIAL_PL2303 \
-              -e USB_SERIAL_CH341 \
-              -e USB_NET_DRIVERS \
-              -e USB_USBNET \
-              -e USB_RTL8150 \
-              -e USB_RTL8152 \
-              -e USB_LAN78XX \
-              -e USB_NET_AX8817X \
-              -e USB_NET_AX88179_178A \
-              -e USB_NET_CDCETHER \
-              -e USB_NET_RNDIS_HOST
           fi
 
           # Resolve all Kconfig dependencies
@@ -920,7 +862,7 @@ jobs:
           fi
 
           # Fair Queue (fq) default network qdisc (discard if already applied in source)
-          if [ "${ENABLE_FQ_DEFAULT}" = "true" ]; then
+          if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then
             if grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
               echo "Skipping FQ default qdisc: already set to fq in source config."
             else
@@ -950,7 +892,7 @@ jobs:
             fi
           fi
           # Kyber I/O scheduler (discard if already enabled/module in source)
-          if [ "${ENABLE_KYBER}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             if grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config; then
               echo "Discarding Kyber tweak: already enabled in source config ($(grep -E '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config))."
             else
@@ -960,7 +902,7 @@ jobs:
           fi
 
           # BFQ I/O scheduler (discard if already enabled/module in source)
-          if [ "${ENABLE_BFQ}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             if grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config; then
               echo "Discarding BFQ tweak: already enabled in source config ($(grep -E '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config))."
             else
@@ -970,7 +912,7 @@ jobs:
           fi
 
           # CPQ I/O scheduler (only enable when newly integrated by the workflow)
-          if [ "${ENABLE_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             if grep -qE "^CONFIG_${CPQ_CONFIG_SYM}=[ym]$" out/.config; then
               echo "Discarding CPQ tweak: already enabled in source config."
             else
@@ -978,11 +920,11 @@ jobs:
               ./scripts/config --file out/.config -e "${CPQ_CONFIG_SYM}"
             fi
           fi
-          # BBRv3 TCP congestion control (built-in and set as default when enabled)
-          if [ "${ENABLE_BBRV3}" = "true" ]; then
-            BBR_SYM="${BBRV3_CONFIG_SYM:-TCP_CONG_BBR}"
-            BBR_DEF="${BBRV3_DEFAULT_SYM:-DEFAULT_BBR}"
-            BBR_NAME="${BBRV3_CONG_NAME:-bbr}"
+          # BBRv3 TCP congestion control (built-in and set as default when tcp_congestion == bbr3)
+          if [ "${TCP_CONGESTION}" = "bbr3" ]; then
+            BBR_SYM="${BBRV3_CONFIG_SYM:-TCP_CONG_BBR3}"
+            BBR_DEF="${BBRV3_DEFAULT_SYM:-DEFAULT_BBR3}"
+            BBR_NAME="${BBRV3_CONG_NAME:-bbr3}"
             if grep -qx "CONFIG_${BBR_SYM}=y" out/.config && grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBR_NAME}\"" out/.config; then
               echo "Skipping BBRv3 config: ${BBR_NAME} is already built-in and default in source config."
             else
@@ -993,13 +935,14 @@ jobs:
                 -e NET_SCH_FQ \
                 -d DEFAULT_CUBIC \
                 -d DEFAULT_RENO \
+                -d DEFAULT_BBR \
                 -e "${BBR_DEF}" \
                 --set-str DEFAULT_TCP_CONG "${BBR_NAME}"
             fi
           fi
 
           # CAKE network packet scheduler (discard if already enabled/module in source)
-          if [ "${ENABLE_CAKE}" = "true" ]; then
+          if [ "${NET_QDISC}" = "fq-cake" ]; then
             if grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config; then
               echo "Discarding CAKE tweak: already enabled in source config ($(grep -E '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config))."
             else
@@ -1043,11 +986,11 @@ jobs:
             grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
           fi
 
-          if [ "${ENABLE_ADIOS}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
           fi
 
-          if [ "${ENABLE_BORE}" = "true" ]; then
+          if [ "${BORE_SCHEDULER}" != "off" ]; then
             grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
           fi
 
@@ -1066,19 +1009,12 @@ jobs:
             grep -qx 'CONFIG_DEVTMPFS=y' out/.config
           fi
 
-          if [ "${ENABLE_NETHUNTER_USB}" = "true" ]; then
-            grep -qx 'CONFIG_USB_CONFIGFS_RNDIS=y' out/.config
-            grep -qx 'CONFIG_USB_CONFIGFS_OBEX=y' out/.config
-            grep -qx 'CONFIG_USB_CONFIGFS_F_HID=y' out/.config
-            grep -qx 'CONFIG_USB_SERIAL=y' out/.config
-            grep -qx 'CONFIG_USB_USBNET=y' out/.config
-          fi
           if [ "${ENABLE_LAZY_RCU}" = "true" ] && [ "${LAZY_RCU_SUPPORTED}" = "true" ]; then
             grep -qx 'CONFIG_RCU_LAZY=y' out/.config
             ! grep -qx 'CONFIG_RCU_LAZY_DEFAULT_OFF=y' out/.config
           fi
 
-          if [ "${ENABLE_FQ_DEFAULT}" = "true" ]; then
+          if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then
             grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config
             grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config
           fi
@@ -1087,24 +1023,24 @@ jobs:
             grep -qx 'CONFIG_HZ_300=y' out/.config
             grep -qx 'CONFIG_HZ=300' out/.config
           fi
-          if [ "${ENABLE_KYBER}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config
           fi
 
-          if [ "${ENABLE_BFQ}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config
           fi
 
-          if [ "${ENABLE_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             grep -qx "CONFIG_${CPQ_CONFIG_SYM}=y" out/.config
           fi
           
-          if [ "${ENABLE_BBRV3}" = "true" ]; then
-            grep -qx "CONFIG_${BBRV3_CONFIG_SYM:-TCP_CONG_BBR}=y" out/.config
-            grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBRV3_CONG_NAME:-bbr}\"" out/.config
+          if [ "${TCP_CONGESTION}" = "bbr3" ]; then
+            grep -qx "CONFIG_${BBRV3_CONFIG_SYM:-TCP_CONG_BBR3}=y" out/.config
+            grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBRV3_CONG_NAME:-bbr3}\"" out/.config
           fi
 
-          if [ "${ENABLE_CAKE}" = "true" ]; then
+          if [ "${NET_QDISC}" = "fq-cake" ]; then
             grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config
           fi
 
