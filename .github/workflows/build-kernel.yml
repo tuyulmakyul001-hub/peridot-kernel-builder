@@ -103,6 +103,46 @@ on:
         required: false
         type: boolean
         default: true
+      enable_lazy_rcu:
+        description: "Enable Lazy RCU at boot for idle battery life (skips if already set or unsupported)"
+        required: false
+        type: boolean
+        default: true
+      enable_fq_default:
+        description: "Set Fair Queue (fq) as default network qdisc (skips if already set in source)"
+        required: false
+        type: boolean
+        default: true
+      enable_hz_300:
+        description: "Set kernel timer tick to 300 Hz for 60/120 Hz pacing (skips if already 300 Hz)"
+        required: false
+        type: boolean
+        default: false
+        enable_kyber:
+        description: "Enable Kyber I/O scheduler (discards if already enabled in source)"
+        required: false
+        type: boolean
+        default: false
+      enable_bfq:
+        description: "Enable BFQ I/O scheduler (discards if already enabled in source)"
+        required: false
+        type: boolean
+        default: false
+      enable_cpq:
+        description: "Integrate CPQ I/O scheduler from Rasenkai/CPQ_IOSched (discards if already in source)"
+        required: false
+        type: boolean
+        default: false
+        enable_bbrv3:
+        description: "Apply KMI-safe BBRv3 backport on 6.1 (requires patches/bbrv3-6.1-kmi-safe.patch; skips if already in source)"
+        required: false
+        type: boolean
+        default: false
+      enable_cake:
+        description: "Enable CAKE network qdisc (CONFIG_NET_SCH_CAKE; skips if already in source)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -196,6 +236,14 @@ jobs:
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
           ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
+          ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
+          ENABLE_FQ_DEFAULT: ${{ inputs.enable_fq_default }}
+          ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
+          ENABLE_KYBER: ${{ inputs.enable_kyber }}
+          ENABLE_BFQ: ${{ inputs.enable_bfq }}
+          ENABLE_CPQ: ${{ inputs.enable_cpq }}
+          ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
+          ENABLE_CAKE: ${{ inputs.enable_cake }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -243,7 +291,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-adios-${ENABLE_ADIOS}-bore-${ENABLE_BORE}-bon-${BORE_DEFAULT_ON}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-fq-${ENABLE_FQ_DEFAULT}-hz300-${ENABLE_HZ_300}-kyb-${ENABLE_KYBER}-bfq-${ENABLE_BFQ}-cpq-${ENABLE_CPQ}-bbr3-${ENABLE_BBRV3}-cake-${ENABLE_CAKE}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -461,6 +509,56 @@ jobs:
           fi
           echo "Detected ADIOS Kconfig symbol: ${ADIOS_SYM}"
           echo "ADIOS_CONFIG_SYM=${ADIOS_SYM}" >> "${GITHUB_ENV}"
+      
+      # Integrate CPQ I/O scheduler (Rasenkai/CPQ_IOSched) only if not already present in kernel source
+      - name: Integrate CPQ I/O scheduler (6.1)
+        if: ${{ inputs.enable_cpq }}
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          if grep -qE '^config[[:space:]]+(MQ_)?IOSCHED_CPQ$' block/Kconfig* || compgen -G 'block/*cpq*.c' >/dev/null; then
+            echo "Discarding CPQ integration: CPQ I/O scheduler is already present in kernel source."
+            exit 0
+          fi
+
+          git clone --depth=1 --single-branch \
+            https://github.com/Rasenkai/CPQ_IOSched.git \
+            "${RUNNER_TEMP}/CPQ_IOSched"
+
+          CPQ_SRC="$(find "${RUNNER_TEMP}/CPQ_IOSched" -maxdepth 3 -type f -name 'cpq*.c' | head -n 1)"
+          if [ -z "${CPQ_SRC}" ]; then
+            echo "::error::Could not locate cpq-iosched.c inside Rasenkai/CPQ_IOSched."
+            exit 1
+          fi
+
+          cp -v "${CPQ_SRC}" block/cpq-iosched.c
+
+          if ! grep -q 'CONFIG_MQ_IOSCHED_CPQ' block/Makefile; then
+            echo 'obj-$(CONFIG_MQ_IOSCHED_CPQ) += cpq-iosched.o' >> block/Makefile
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          kconfig = Path("block/Kconfig.iosched")
+          text = kconfig.read_text()
+          entry = """
+          config MQ_IOSCHED_CPQ
+          \ttristate "CPQ I/O scheduler"
+          \tdefault n
+          \thelp
+          \t  Custom Priority Queue (CPQ) blk-mq I/O scheduler.
+
+          """
+          idx = text.rfind("endmenu")
+          if idx == -1:
+              raise SystemExit("Could not find endmenu in block/Kconfig.iosched")
+          kconfig.write_text(text[:idx] + entry + text[idx:])
+          PY
+
+          grep -q '^config MQ_IOSCHED_CPQ$' block/Kconfig.iosched
+          echo "CPQ_CONFIG_SYM=MQ_IOSCHED_CPQ" >> "${GITHUB_ENV}"    
 
       # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
       - name: Apply KMI-safe BORE scheduler patch (6.1)
@@ -547,6 +645,36 @@ jobs:
 
           cd kernel
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
+          # Dry-run and apply local KMI-safe Linux 6.1 BBRv3 patch (discards if BBRv3 is already in source)
+      
+      - name: Apply KMI-safe BBRv3 patch (6.1)
+        if: ${{ inputs.enable_bbrv3 }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          cd kernel
+
+          if grep -qE 'bbr_fast_ack_mode|bbr_inflight_hi|BBR_VERSION' net/ipv4/tcp_bbr*.c 2>/dev/null \
+            || grep -qE '^config TCP_CONG_BBR3$' net/ipv4/Kconfig; then
+            echo "Discarding BBRv3 patch: BBRv3 is already present in kernel source."
+          else
+            BBRV3_PATCH="${GITHUB_WORKSPACE}/builder/patches/bbrv3-6.1-kmi-safe.patch"
+            if [ ! -f "${BBRV3_PATCH}" ]; then
+              echo "::error::Missing patches/bbrv3-6.1-kmi-safe.patch in your builder repository. Add a KABI-compliant Linux 6.1 BBRv3 patch there before enabling enable_bbrv3."
+              exit 1
+            fi
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BBRV3_PATCH}"
+          fi
+
+          if grep -qE '^config TCP_CONG_BBR3$' net/ipv4/Kconfig; then
+            echo "BBRV3_CONFIG_SYM=TCP_CONG_BBR3" >> "${GITHUB_ENV}"
+            echo "BBRV3_DEFAULT_SYM=DEFAULT_BBR3" >> "${GITHUB_ENV}"
+            echo "BBRV3_CONG_NAME=bbr3" >> "${GITHUB_ENV}"
+          else
+            echo "BBRV3_CONFIG_SYM=TCP_CONG_BBR" >> "${GITHUB_ENV}"
+            echo "BBRV3_DEFAULT_SYM=DEFAULT_BBR" >> "${GITHUB_ENV}"
+            echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
+          fi
 
       # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
@@ -559,6 +687,14 @@ jobs:
           ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
           ENABLE_NETHUNTER_USB: ${{ inputs.enable_nethunter_usb }}
           ENABLE_MGLRU: ${{ inputs.enable_mglru }}
+          ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
+          ENABLE_FQ_DEFAULT: ${{ inputs.enable_fq_default }}
+          ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
+          ENABLE_KYBER: ${{ inputs.enable_kyber }}
+          ENABLE_BFQ: ${{ inputs.enable_bfq }}
+          ENABLE_CPQ: ${{ inputs.enable_cpq }}
+          ENABLE_BBRV3: ${{ inputs.enable_bbrv3 }}
+          ENABLE_CAKE: ${{ inputs.enable_cake }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -730,6 +866,114 @@ jobs:
               -d LTO_CLANG_FULL \
               -e LTO_CLANG_THIN
           fi
+          # Lazy RCU active at boot (discard if already applied in source or unsupported by tree)
+          LAZY_RCU_SUPPORTED="false"
+          if [ "${ENABLE_LAZY_RCU}" = "true" ]; then
+            if grep -qE '^config RCU_LAZY$' kernel/rcu/Kconfig; then
+              LAZY_RCU_SUPPORTED="true"
+              if grep -qx 'CONFIG_RCU_LAZY=y' out/.config && ! grep -qx 'CONFIG_RCU_LAZY_DEFAULT_OFF=y' out/.config; then
+                echo "Skipping Lazy RCU: already enabled at boot in source config."
+              else
+                echo "Applying Lazy RCU tweak: CONFIG_RCU_LAZY=y, CONFIG_RCU_LAZY_DEFAULT_OFF=n"
+                ./scripts/config --file out/.config \
+                  -e RCU_LAZY \
+                  -d RCU_LAZY_DEFAULT_OFF
+              fi
+            else
+              echo "::warning::CONFIG_RCU_LAZY is not present in kernel/rcu/Kconfig; discarding Lazy RCU tweak."
+            fi
+          fi
+
+          # Fair Queue (fq) default network qdisc (discard if already applied in source)
+          if [ "${ENABLE_FQ_DEFAULT}" = "true" ]; then
+            if grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
+              echo "Skipping FQ default qdisc: already set to fq in source config."
+            else
+              echo "Applying FQ default qdisc tweak: CONFIG_NET_SCH_FQ=y, CONFIG_DEFAULT_FQ=y"
+              ./scripts/config --file out/.config \
+                -e NET_SCHED \
+                -e NET_SCH_FQ \
+                -d DEFAULT_FQ_CODEL \
+                -d DEFAULT_PFIFO_FAST \
+                -d DEFAULT_SFQ \
+                -e DEFAULT_FQ \
+                --set-str DEFAULT_NET_SCH fq
+            fi
+          fi
+
+          # 300 Hz kernel timer tick (discard if already 300 Hz in source)
+          if [ "${ENABLE_HZ_300}" = "true" ]; then
+            if grep -qx 'CONFIG_HZ_300=y' out/.config; then
+              echo "Skipping 300 Hz timer tick: CONFIG_HZ_300=y already enabled in source config."
+            else
+              echo "Applying 300 Hz timer tick tweak: CONFIG_HZ_300=y"
+              ./scripts/config --file out/.config \
+                -d HZ_100 \
+                -d HZ_250 \
+                -d HZ_1000 \
+                -e HZ_300
+            fi
+          fi
+          # Kyber I/O scheduler (discard if already enabled/module in source)
+          if [ "${ENABLE_KYBER}" = "true" ]; then
+            if grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config; then
+              echo "Discarding Kyber tweak: already enabled in source config ($(grep -E '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config))."
+            else
+              echo "Applying Kyber I/O scheduler: CONFIG_MQ_IOSCHED_KYBER=y"
+              ./scripts/config --file out/.config -e MQ_IOSCHED_KYBER
+            fi
+          fi
+
+          # BFQ I/O scheduler (discard if already enabled/module in source)
+          if [ "${ENABLE_BFQ}" = "true" ]; then
+            if grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config; then
+              echo "Discarding BFQ tweak: already enabled in source config ($(grep -E '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config))."
+            else
+              echo "Applying BFQ I/O scheduler: CONFIG_IOSCHED_BFQ=y"
+              ./scripts/config --file out/.config -e IOSCHED_BFQ
+            fi
+          fi
+
+          # CPQ I/O scheduler (only enable when newly integrated by the workflow)
+          if [ "${ENABLE_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+            if grep -qE "^CONFIG_${CPQ_CONFIG_SYM}=[ym]$" out/.config; then
+              echo "Discarding CPQ tweak: already enabled in source config."
+            else
+              echo "Applying CPQ I/O scheduler: CONFIG_${CPQ_CONFIG_SYM}=y"
+              ./scripts/config --file out/.config -e "${CPQ_CONFIG_SYM}"
+            fi
+          fi
+          # BBRv3 TCP congestion control (built-in and set as default when enabled)
+          if [ "${ENABLE_BBRV3}" = "true" ]; then
+            BBR_SYM="${BBRV3_CONFIG_SYM:-TCP_CONG_BBR}"
+            BBR_DEF="${BBRV3_DEFAULT_SYM:-DEFAULT_BBR}"
+            BBR_NAME="${BBRV3_CONG_NAME:-bbr}"
+            if grep -qx "CONFIG_${BBR_SYM}=y" out/.config && grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBR_NAME}\"" out/.config; then
+              echo "Skipping BBRv3 config: ${BBR_NAME} is already built-in and default in source config."
+            else
+              echo "Applying BBRv3 config: CONFIG_${BBR_SYM}=y (default=${BBR_NAME})"
+              ./scripts/config --file out/.config \
+                -e TCP_CONG_ADVANCED \
+                -e "${BBR_SYM}" \
+                -e NET_SCH_FQ \
+                -d DEFAULT_CUBIC \
+                -d DEFAULT_RENO \
+                -e "${BBR_DEF}" \
+                --set-str DEFAULT_TCP_CONG "${BBR_NAME}"
+            fi
+          fi
+
+          # CAKE network packet scheduler (discard if already enabled/module in source)
+          if [ "${ENABLE_CAKE}" = "true" ]; then
+            if grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config; then
+              echo "Discarding CAKE tweak: already enabled in source config ($(grep -E '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config))."
+            else
+              echo "Applying CAKE network scheduler: CONFIG_NET_SCH_CAKE=y"
+              ./scripts/config --file out/.config \
+                -e NET_SCHED \
+                -e NET_SCH_CAKE
+            fi
+          fi
           make "${MAKE_ARGS[@]}" olddefconfig
           if [ "${ENABLE_MGLRU}" = "true" ]; then
             grep -qx 'CONFIG_LRU_GEN=y' out/.config
@@ -783,6 +1027,39 @@ jobs:
             grep -qx 'CONFIG_USB_CONFIGFS_F_HID=y' out/.config
             grep -qx 'CONFIG_USB_SERIAL=y' out/.config
             grep -qx 'CONFIG_USB_USBNET=y' out/.config
+          fi
+          if [ "${ENABLE_LAZY_RCU}" = "true" ] && [ "${LAZY_RCU_SUPPORTED}" = "true" ]; then
+            grep -qx 'CONFIG_RCU_LAZY=y' out/.config
+            ! grep -qx 'CONFIG_RCU_LAZY_DEFAULT_OFF=y' out/.config
+          fi
+
+          if [ "${ENABLE_FQ_DEFAULT}" = "true" ]; then
+            grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config
+            grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config
+          fi
+
+          if [ "${ENABLE_HZ_300}" = "true" ]; then
+            grep -qx 'CONFIG_HZ_300=y' out/.config
+            grep -qx 'CONFIG_HZ=300' out/.config
+          fi
+          if [ "${ENABLE_KYBER}" = "true" ]; then
+            grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config
+          fi
+
+          if [ "${ENABLE_BFQ}" = "true" ]; then
+            grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config
+          fi
+
+          if [ "${ENABLE_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+            grep -qx "CONFIG_${CPQ_CONFIG_SYM}=y" out/.config
+          fi
+          if [ "${ENABLE_BBRV3}" = "true" ]; then
+            grep -qx "CONFIG_${BBRV3_CONFIG_SYM:-TCP_CONG_BBR}=y" out/.config
+            grep -qx "CONFIG_DEFAULT_TCP_CONG=\"${BBRV3_CONG_NAME:-bbr}\"" out/.config
+          fi
+
+          if [ "${ENABLE_CAKE}" = "true" ]; then
+            grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config
           fi
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
