@@ -149,6 +149,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_kmi_safe_tweaks:
+        description: "Apply consolidated KMI-safe power/arm64/sched/F2FS tweaks (requires patches/kmi-safe-tweaks-6.1.patch)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -246,6 +251,7 @@ jobs:
           CPU_GOVERNORS: ${{ inputs.cpu_governors }}
           ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
           ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
+          ENABLE_KMI_SAFE_TWEAKS: ${{ inputs.enable_kmi_safe_tweaks }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -293,7 +299,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}-kmitwk-${ENABLE_KMI_SAFE_TWEAKS}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -702,6 +708,20 @@ jobs:
             echo "BBRV3_DEFAULT_SYM=DEFAULT_BBR" >> "${GITHUB_ENV}"
             echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
           fi
+
+          # Dry-run and apply consolidated KMI-safe power, arm64, sched, and F2FS tweaks (6.1)
+      - name: Apply KMI-safe tweaks patch (6.1)
+        if: ${{ inputs.enable_kmi_safe_tweaks }}
+        run: |
+          set -euxo pipefail
+          chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
+          TWEAKS_PATCH="${GITHUB_WORKSPACE}/builder/patches/kmi-safe-tweaks-6.1.patch"
+          if [ ! -f "${TWEAKS_PATCH}" ]; then
+            echo "::error::Missing patches/kmi-safe-tweaks-6.1.patch in your builder repository."
+            exit 1
+          fi
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${TWEAKS_PATCH}"
 
       # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
@@ -1247,6 +1267,7 @@ jobs:
           CPU_GOVERNORS: ${{ inputs.cpu_governors }}
           ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
           ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
+          ENABLE_KMI_SAFE_TWEAKS: ${{ inputs.enable_kmi_safe_tweaks }}
         run: |
           set -euo pipefail
           BASE_CFG="${RUNNER_TEMP}/base.config"
@@ -1359,6 +1380,7 @@ jobs:
             echo "| **Baseband-guard LSM** | \`${ENABLE_BASEBAND_GUARD}\` | $([ "${ENABLE_BASEBAND_GUARD}" = "true" ] && echo "Applied" || echo "Disabled") | \`CONFIG_BBG\` |"
             echo "| **Droidspaces** | \`${ENABLE_DROIDSPACES}\` | $([ "${ENABLE_DROIDSPACES}" = "true" ] && echo "Applied" || echo "Disabled") | \`SYSVIPC / NS\` |"
             echo "| **Unicode Bypass Fix** | \`${ENABLE_UNICODE_FIX}\` | $([ "${ENABLE_UNICODE_FIX}" = "true" ] && echo "Applied" || echo "Disabled") | \`unicode_bypass_fix_6.1+\` |"
+            echo "| **KMI-Safe Tweaks Pack** | \`${ENABLE_KMI_SAFE_TWEAKS}\` | $([ "${ENABLE_KMI_SAFE_TWEAKS}" = "true" ] && echo "Applied" || echo "Disabled") | \`kmi-safe-tweaks-6.1.patch\` |"
             echo ""
             echo "### Artifact SHA-256 Checksums"
             echo ""
