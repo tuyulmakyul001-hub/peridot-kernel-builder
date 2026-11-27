@@ -129,6 +129,26 @@ on:
         required: false
         type: boolean
         default: false
+      cpu_governors:
+        description: "Extra official 6.1 CPU governors (ondemand, userspace, or both; skips if already in source)"
+        required: false
+        type: choice
+        default: "all"
+        options:
+          - stock
+          - ondemand
+          - userspace
+          - all
+      enable_ttl_mangling:
+        description: "Enable hotspot TTL/HL mangling (IP_NF_TARGET_TTL/IP6_NF_TARGET_HL/XT_HL; skips if already in source)"
+        required: false
+        type: boolean
+        default: false
+      enable_ntfs3:
+        description: "Enable native in-kernel NTFS3 read/write filesystem (CONFIG_NTFS3_FS; skips if already in source)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -223,6 +243,9 @@ jobs:
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
           NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
+          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
+          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
+          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -270,7 +293,7 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -668,6 +691,9 @@ jobs:
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
           NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
+          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
+          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
+          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -688,6 +714,8 @@ jobs:
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/peridot_GKI.config
+
+          cp out/.config "${RUNNER_TEMP}/base.config"
 
           # Root, SUSFS, and KPM options
           if [ "${ROOT_VARIANT}" != "none" ]; then
@@ -918,6 +946,51 @@ jobs:
             fi
           fi
 
+          # Official ondemand CPU governor (discard if already enabled/module in source)
+          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
+            if grep -qE '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config; then
+              echo "Discarding ondemand governor: already enabled in source config ($(grep -E '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config))."
+            else
+              echo "Applying CPU governor: CONFIG_CPU_FREQ_GOV_ONDEMAND=y"
+              ./scripts/config --file out/.config -e CPU_FREQ_GOV_ONDEMAND
+            fi
+          fi
+
+          # Official userspace CPU governor (discard if already enabled/module in source)
+          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
+            if grep -qE '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config; then
+              echo "Discarding userspace governor: already enabled in source config ($(grep -E '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config))."
+            else
+              echo "Applying CPU governor: CONFIG_CPU_FREQ_GOV_USERSPACE=y"
+              ./scripts/config --file out/.config -e CPU_FREQ_GOV_USERSPACE
+            fi
+          fi
+
+          # Hotspot TTL/HL mangling (discard symbols already enabled/module in source)
+          if [ "${ENABLE_TTL_MANGLING}" = "true" ]; then
+            for sym in NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL; do
+              if grep -qE "^CONFIG_${sym}=[ym]$" out/.config; then
+                echo "Discarding CONFIG_${sym}: already enabled in source config."
+              else
+                echo "Applying TTL/HL mangling: CONFIG_${sym}=y"
+                ./scripts/config --file out/.config -e "${sym}"
+              fi
+            done
+          fi
+
+          # Native NTFS3 read/write filesystem (discard if already enabled/module in source)
+          if [ "${ENABLE_NTFS3}" = "true" ]; then
+            if grep -qE '^CONFIG_NTFS3_FS=[ym]$' out/.config; then
+              echo "Discarding NTFS3 tweak: already enabled in source config ($(grep -E '^CONFIG_NTFS3_FS=[ym]$' out/.config))."
+            else
+              echo "Applying NTFS3 filesystem: CONFIG_NTFS3_FS=y, CONFIG_NTFS3_LZX_XPRESS=y, CONFIG_NTFS3_FS_POSIX_ACL=y"
+              ./scripts/config --file out/.config \
+                -e NTFS3_FS \
+                -e NTFS3_LZX_XPRESS \
+                -e NTFS3_FS_POSIX_ACL
+            fi
+          fi
+
           make "${MAKE_ARGS[@]}" olddefconfig
           if [ "${ENABLE_MGLRU}" = "true" ]; then
             grep -qx 'CONFIG_LRU_GEN=y' out/.config
@@ -1000,6 +1073,23 @@ jobs:
             grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config
           fi
 
+          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
+            grep -qE '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config
+          fi
+
+          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
+            grep -qE '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config
+          fi
+
+          if [ "${ENABLE_TTL_MANGLING}" = "true" ]; then
+            for sym in NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL; do
+              grep -qE "^CONFIG_${sym}=[ym]$" out/.config
+            done
+          fi
+
+          if [ "${ENABLE_NTFS3}" = "true" ]; then
+            grep -qE '^CONFIG_NTFS3_FS=[ym]$' out/.config
+          fi
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
       - name: Build kernel Image
@@ -1105,6 +1195,155 @@ jobs:
           name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
           path: artifacts/
           if-no-files-found: error
+
+      # Publish a Markdown job summary with applied vs. skipped tweaks and artifact SHA-256 checksums
+      - name: Publish build summary
+        env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+          ROOT_VARIANT: ${{ inputs.root_variant }}
+          TCP_CONGESTION: ${{ inputs.tcp_congestion }}
+          OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
+          ENABLE_MLGO: ${{ inputs.enable_mlgo }}
+          IO_SCHEDULER: ${{ inputs.io_scheduler }}
+          BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
+          ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
+          ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
+          ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
+          ENABLE_MGLRU: ${{ inputs.enable_mglru }}
+          ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
+          ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
+          NET_QDISC: ${{ inputs.net_qdisc }}
+          ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
+          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
+          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
+          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
+        run: |
+          set -euo pipefail
+          BASE_CFG="${RUNNER_TEMP}/base.config"
+          FINAL_CFG="kernel/out/.config"
+
+          has_sym() {
+            grep -qE "^CONFIG_${2}=[ym]$" "$1" 2>/dev/null
+          }
+
+          status_for_sym() {
+            local requested="$1"
+            local sym="$2"
+            if [ "${requested}" != "true" ]; then
+              echo "Disabled"
+            elif has_sym "${BASE_CFG}" "${sym}"; then
+              echo "Skipped (already in source)"
+            elif has_sym "${FINAL_CFG}" "${sym}"; then
+              echo "Applied"
+            else
+              echo "Unsupported / Dropped"
+            fi
+          }
+
+          status_for_all_syms() {
+            local requested="$1"
+            shift
+            if [ "${requested}" != "true" ]; then
+              echo "Disabled"
+              return
+            fi
+            local all_base=1
+            local all_final=1
+            for s in "$@"; do
+              has_sym "${BASE_CFG}" "${s}" || all_base=0
+              has_sym "${FINAL_CFG}" "${s}" || all_final=0
+            done
+            if [ "${all_base}" -eq 1 ]; then
+              echo "Skipped (already in source)"
+            elif [ "${all_final}" -eq 1 ]; then
+              echo "Applied"
+            else
+              echo "Unsupported / Partial"
+            fi
+          }
+
+          DEF_TCP="$(awk -F '=' '/^CONFIG_DEFAULT_TCP_CONG=/ {gsub(/"/, "", $2); print $2; exit}' "${FINAL_CFG}")"
+          DEF_QDISC="$(awk -F '=' '/^CONFIG_DEFAULT_NET_SCH=/ {gsub(/"/, "", $2); print $2; exit}' "${FINAL_CFG}")"
+          DEF_HZ="$(awk -F '=' '/^CONFIG_HZ=/ {print $2; exit}' "${FINAL_CFG}")"
+          LTO_MODE="None"
+          grep -qx 'CONFIG_LTO_CLANG_THIN=y' "${FINAL_CFG}" && LTO_MODE="ThinLTO"
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' "${FINAL_CFG}" && LTO_MODE="Full LTO"
+
+          MLGO_STATUS="Disabled"
+          if [ "${ENABLE_MLGO}" = "true" ]; then
+            if [[ "${EXTRA_KCFLAGS:-}" == *"regalloc-enable-advisor=release"* ]]; then
+              MLGO_STATUS="Applied"
+            else
+              MLGO_STATUS="Skipped (unsupported by Clang)"
+            fi
+          fi
+
+          TUNE_STATUS="Disabled"
+          if [ "${ENABLE_CPU_TUNE}" = "true" ]; then
+            if [[ "${EXTRA_KCFLAGS:-}" == *"-mtune=cortex-a720"* ]]; then
+              TUNE_STATUS="Applied"
+            else
+              TUNE_STATUS="Skipped (unsupported by Clang)"
+            fi
+          fi
+
+          FQ_REQ="false"
+          CAKE_REQ="false"
+          if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then FQ_REQ="true"; fi
+          if [ "${NET_QDISC}" = "fq-cake" ]; then CAKE_REQ="true"; fi
+
+          OND_REQ="false"
+          USR_REQ="false"
+          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then OND_REQ="true"; fi
+          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then USR_REQ="true"; fi
+
+          {
+            echo "## POCO F6 (peridot) Kernel Build Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "| :--- | :--- |"
+            echo "| **Kernel** | \`${KERNEL_VERSION}\` (\`${KERNEL_REPO}@${KERNEL_BRANCH}\`, \`${SHORT_COMMIT}\`) |"
+            echo "| **Root Variant** | \`${ROOT_VARIANT}\` |"
+            echo "| **Toolchain** | AOSP Clang \`${CLANG_VERSION}\` (\`${LTO_MODE}\`, \`-${OPTIMIZE_LEVEL}\`) |"
+            echo "| **Extra KCFLAGS** | \`${EXTRA_KCFLAGS:-none}\` |"
+            echo "| **Output Zip** | \`${ZIP_NAME}\` |"
+            echo ""
+            echo "### Tweaks & Features"
+            echo ""
+            echo "| Feature | Input | Status | Effective Config |"
+            echo "| :--- | :--- | :--- | :--- |"
+            echo "| **TCP Congestion** | \`${TCP_CONGESTION}\` | $([ "${TCP_CONGESTION}" = "stock" ] && echo "Stock" || echo "Applied") | \`${DEF_TCP:-unknown}\` |"
+            echo "| **FQ Default Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${FQ_REQ}" "DEFAULT_FQ") | \`${DEF_QDISC:-unknown}\` |"
+            echo "| **CAKE Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${CAKE_REQ}" "NET_SCH_CAKE") | \`CONFIG_NET_SCH_CAKE\` |"
+            echo "| **I/O Scheduler** | \`${IO_SCHEDULER}\` | $([ "${IO_SCHEDULER}" = "stock" ] && echo "Stock" || echo "Applied") | \`${IO_SCHEDULER}\` |"
+            echo "| **BORE Scheduler** | \`${BORE_SCHEDULER}\` | $([ "${BORE_SCHEDULER}" = "off" ] && echo "Disabled" || echo "Applied") | \`${BORE_SCHEDULER}\` |"
+            echo "| **MGLRU** | \`${ENABLE_MGLRU}\` | $(status_for_all_syms "${ENABLE_MGLRU}" LRU_GEN LRU_GEN_ENABLED) | \`CONFIG_LRU_GEN_ENABLED\` |"
+            echo "| **Lazy RCU** | \`${ENABLE_LAZY_RCU}\` | $(status_for_sym "${ENABLE_LAZY_RCU}" "RCU_LAZY") | \`CONFIG_RCU_LAZY\` |"
+            echo "| **300 Hz Timer Tick** | \`${ENABLE_HZ_300}\` | $(status_for_sym "${ENABLE_HZ_300}" "HZ_300") | \`${DEF_HZ:-unknown} Hz\` |"
+            echo "| **MLGO Regalloc** | \`${ENABLE_MLGO}\` | ${MLGO_STATUS} | \`-regalloc-enable-advisor=release\` |"
+            echo "| **SM8635 CPU Tune** | \`${ENABLE_CPU_TUNE}\` | ${TUNE_STATUS} | \`-mtune=cortex-a720\` |"
+            echo "| **Governor: ondemand** | \`${CPU_GOVERNORS}\` | $(status_for_sym "${OND_REQ}" "CPU_FREQ_GOV_ONDEMAND") | \`CONFIG_CPU_FREQ_GOV_ONDEMAND\` |"
+            echo "| **Governor: userspace** | \`${CPU_GOVERNORS}\` | $(status_for_sym "${USR_REQ}" "CPU_FREQ_GOV_USERSPACE") | \`CONFIG_CPU_FREQ_GOV_USERSPACE\` |"
+            echo "| **Hotspot TTL/HL Mangling** | \`${ENABLE_TTL_MANGLING}\` | $(status_for_all_syms "${ENABLE_TTL_MANGLING}" NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL) | \`XT_HL / TTL / HL\` |"
+            echo "| **Native NTFS3 FS** | \`${ENABLE_NTFS3}\` | $(status_for_sym "${ENABLE_NTFS3}" "NTFS3_FS") | \`CONFIG_NTFS3_FS\` |"
+            echo "| **Baseband-guard LSM** | \`${ENABLE_BASEBAND_GUARD}\` | $([ "${ENABLE_BASEBAND_GUARD}" = "true" ] && echo "Applied" || echo "Disabled") | \`CONFIG_BBG\` |"
+            echo "| **Droidspaces** | \`${ENABLE_DROIDSPACES}\` | $([ "${ENABLE_DROIDSPACES}" = "true" ] && echo "Applied" || echo "Disabled") | \`SYSVIPC / NS\` |"
+            echo "| **Unicode Bypass Fix** | \`${ENABLE_UNICODE_FIX}\` | $([ "${ENABLE_UNICODE_FIX}" = "true" ] && echo "Applied" || echo "Disabled") | \`unicode_bypass_fix_6.1+\` |"
+            echo ""
+            echo "### Artifact SHA-256 Checksums"
+            echo ""
+            echo "| File | Size | SHA-256 |"
+            echo "| :--- | :--- | :--- |"
+            for f in "${ZIP_NAME}" Image.gz Image; do
+              if [ -f "${GITHUB_WORKSPACE}/artifacts/${f}" ]; then
+                SIZE="$(du -h "${GITHUB_WORKSPACE}/artifacts/${f}" | awk '{print $1}')"
+                SHA="$(sha256sum "${GITHUB_WORKSPACE}/artifacts/${f}" | awk '{print $1}')"
+                echo "| \`${f}\` | ${SIZE} | \`${SHA}\` |"
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
 
       # Upload the build log on failure so compilation errors can still be downloaded
       - name: Upload build log on failure
