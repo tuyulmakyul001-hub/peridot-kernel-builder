@@ -65,24 +65,18 @@ on:
         type: boolean
         default: true
       io_scheduler:
-        description: "Extra I/O scheduler to integrate/enable (all = ADIOS + CPQ + Kyber + BFQ)"
+        description: "Extra I/O schedulers (comma-separated: stock, all, or any mix of adios,cpq,kyber,bfq)"
         required: false
-        type: choice
+        type: string
         default: "stock"
-        options:
-          - stock
-          - adios
-          - cpq
-          - kyber
-          - bfq
-          - all
       bore_scheduler:
-        description: "KMI-safe BORE CPU scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
+        description: "BORE CPU scheduler (disabled = force off; stock = keep tree default; boot-on/boot-off = patch & enable)"
         required: false
         type: choice
-        default: "off"
+        default: "disabled"
         options:
-          - off
+          - disabled
+          - stock
           - boot-on
           - boot-off
       enable_baseband_guard:
@@ -299,7 +293,52 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}-kmitwk-${ENABLE_KMI_SAFE_TWEAKS}"
+          # Parse comma-separated io_scheduler list (supports stock, all, or any combination of adios,cpq,kyber,bfq)
+          IO_WANT_ADIOS="false"
+          IO_WANT_CPQ="false"
+          IO_WANT_KYBER="false"
+          IO_WANT_BFQ="false"
+          RAW_IO="$(printf '%s' "${IO_SCHEDULER}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          if [ -z "${RAW_IO}" ] || [ "${RAW_IO}" = "stock" ] || [ "${RAW_IO}" = "none" ]; then
+            IO_NORM="stock"
+          else
+            IFS=',' read -ra IO_TOKENS <<< "${RAW_IO}"
+            for tok in "${IO_TOKENS[@]}"; do
+              [ -z "${tok}" ] && continue
+              case "${tok}" in
+                stock|none) ;;
+                all)
+                  IO_WANT_ADIOS="true"
+                  IO_WANT_CPQ="true"
+                  IO_WANT_KYBER="true"
+                  IO_WANT_BFQ="true"
+                  ;;
+                adios) IO_WANT_ADIOS="true" ;;
+                cpq)   IO_WANT_CPQ="true" ;;
+                kyber) IO_WANT_KYBER="true" ;;
+                bfq)   IO_WANT_BFQ="true" ;;
+                *)
+                  echo "::error::Unsupported io_scheduler token '${tok}'. Allowed values: stock, all, adios, cpq, kyber, bfq (comma-separated)."
+                  exit 1
+                  ;;
+              esac
+            done
+            IO_LIST=()
+            [ "${IO_WANT_ADIOS}" = "true" ] && IO_LIST+=(adios)
+            [ "${IO_WANT_CPQ}" = "true" ]   && IO_LIST+=(cpq)
+            [ "${IO_WANT_KYBER}" = "true" ] && IO_LIST+=(kyber)
+            [ "${IO_WANT_BFQ}" = "true" ]   && IO_LIST+=(bfq)
+            if [ "${#IO_LIST[@]}" -eq 0 ]; then
+              IO_NORM="stock"
+            elif [ "${#IO_LIST[@]}" -eq 4 ]; then
+              IO_NORM="all"
+            else
+              IO_NORM="$(IFS='-'; echo "${IO_LIST[*]}")"
+            fi
+          fi
+          echo "Normalized io_scheduler: ${IO_NORM} (adios=${IO_WANT_ADIOS}, cpq=${IO_WANT_CPQ}, kyber=${IO_WANT_KYBER}, bfq=${IO_WANT_BFQ})"
+
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_NORM}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}-kmitwk-${ENABLE_KMI_SAFE_TWEAKS}"
           ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
@@ -309,6 +348,11 @@ jobs:
             echo "BUILD_DATE=${BUILD_DATE}"
             echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
             echo "KERNEL_NAME=${KERNEL_NAME}"
+            echo "IO_NORM=${IO_NORM}"
+            echo "IO_WANT_ADIOS=${IO_WANT_ADIOS}"
+            echo "IO_WANT_CPQ=${IO_WANT_CPQ}"
+            echo "IO_WANT_KYBER=${IO_WANT_KYBER}"
+            echo "IO_WANT_BFQ=${IO_WANT_BFQ}"
             echo "FEATURE_TAG=${FEATURE_TAG}"
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
@@ -473,7 +517,7 @@ jobs:
 
           test -f drivers/kernelsu/Kconfig
 
-# Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
+      # Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
       - name: Apply SUSFS kernel patches (gki-android14-6.1)
         if: ${{ contains(inputs.root_variant, '-susfs') }}
         env:
@@ -490,9 +534,9 @@ jobs:
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
 
-          # Test the fs/proc/bootconfig.c hunk alone first.
-          # Clean trees keep the stock patch; modified forks (e.g. hoshikv's is_global_init change)
-          # strip only bootconfig.c from the patch and inject the SUSFS hook directly.
+          # Handle fs/proc/bootconfig.c context drift on custom forks (e.g. non-SUSFS bootconfig patches):
+          # test the bootconfig.c hunk first; only if it fails dry-run, strip it and inject SUSFS
+          # directly into boot_config_proc_show() (unless already present).
           python3 - <<'PY'
           from pathlib import Path
           import os, re, subprocess, tempfile
@@ -500,26 +544,18 @@ jobs:
           patch_path = Path(os.environ["SUSFS_PATCH_FILE"])
           bc_path = Path("fs/proc/bootconfig.c")
           raw = patch_path.read_text(encoding="utf-8", errors="replace")
+          marker = "diff --git a/fs/proc/bootconfig.c b/fs/proc/bootconfig.c\n"
+          idx = raw.find(marker)
+          if idx == -1 or not bc_path.exists():
+              raise SystemExit(0)
 
-          m_git = re.search(r"^diff --git a/fs/proc/bootconfig\.c b/fs/proc/bootconfig\.c\n", raw, re.M)
-          m_uni = re.search(r"^--- a/fs/proc/bootconfig\.c\b.*\n", raw, re.M)
-
-          if m_git:
-              idx = m_git.start()
-              next_m = re.search(r"\ndiff --git ", raw[m_git.end():])
-              end_idx = (m_git.end() + next_m.start() + 1) if next_m else len(raw)
-          elif m_uni:
-              idx = m_uni.start()
-              next_m = re.search(r"\n--- a/", raw[m_uni.end():])
-              end_idx = (m_uni.end() + next_m.start() + 1) if next_m else len(raw)
+          next_idx = raw.find("\ndiff --git ", idx + len(marker))
+          if next_idx != -1:
+              bc_hunk = raw[idx:next_idx + 1]
+              rest_patch = raw[:idx] + raw[next_idx + 1:]
           else:
-              raise SystemExit(0)
-
-          if not bc_path.exists():
-              raise SystemExit(0)
-
-          bc_hunk = raw[idx:end_idx]
-          rest_patch = raw[:idx] + raw[end_idx:]
+              bc_hunk = raw[idx:]
+              rest_patch = raw[:idx]
 
           with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as tf:
               tf.write(bc_hunk)
@@ -538,7 +574,7 @@ jobs:
               print("fs/proc/bootconfig.c hunk applies cleanly; keeping original SUSFS patch.")
               raise SystemExit(0)
 
-          print("fs/proc/bootconfig.c hunk conflicted with kernel fork; stripping hunk and injecting SUSFS hook.")
+          print("fs/proc/bootconfig.c hunk conflicted with kernel fork; stripping hunk from SUSFS patch.")
           patch_path.write_text(rest_patch, encoding="utf-8", newline="\n")
 
           bc_src = bc_path.read_text(encoding="utf-8", errors="replace")
@@ -563,16 +599,17 @@ jobs:
               "#endif\n"
           )
 
-          m_fn = re.search(r"(static\s+int\s+boot_config_proc_show\s*\([^)]*\)\s*\{\n)", bc_src)
-          if not m_fn:
-              raise SystemExit("::error::Could not locate boot_config_proc_show() in fs/proc/bootconfig.c.")
+          m = re.search(r"(static\s+int\s+boot_config_proc_show\s*\([^)]*\)\s*\{\n)", bc_src)
+          if not m:
+              raise SystemExit("::error::Could not locate boot_config_proc_show() in fs/proc/bootconfig.c for fallback SUSFS injection.")
 
-          body_start = m_fn.end()
+          # Place extern declarations right before boot_config_proc_show()
+          # and place the runtime hook after any leading local variable declarations
+          # to satisfy -Wdeclaration-after-statement.
+          body_start = m.end()
           lines_after = bc_src[body_start:].splitlines(keepends=True)
           insert_offset = 0
-          decl_re = re.compile(
-              r"^\s*(?:(?:const|static|unsigned|signed|struct|enum|char|int|long|short|size_t|ssize_t|bool|u8|u16|u32|u64)\b.*?;\s*$|/\*.*?\*/\s*$|//.*$|\s*$)"
-          )
+          decl_re = re.compile(r"^\s*(?:(?:const|static|unsigned|signed|struct|enum|char|int|long|short|size_t|ssize_t|bool|u8|u16|u32|u64)\b.*?;\s*$|/\*.*?\*/\s*$|//.*$|\s*$)")
           for line in lines_after:
               if decl_re.match(line):
                   insert_offset += len(line)
@@ -580,13 +617,14 @@ jobs:
                   break
 
           new_bc = (
-              bc_src[:m_fn.start()]
+              bc_src[:m.start()]
               + extern_block
-              + bc_src[m_fn.start():body_start + insert_offset]
+              + bc_src[m.start():body_start + insert_offset]
               + hook_block
               + bc_src[body_start + insert_offset:]
           )
           bc_path.write_text(new_bc, encoding="utf-8", newline="\n")
+          print("Injected SUSFS bootconfig spoofing into fs/proc/bootconfig.c:")
           subprocess.run(["git", "diff", "--", "fs/proc/bootconfig.c"], check=False)
           PY
 
@@ -597,24 +635,28 @@ jobs:
             android/abi_gki_protected_exports_aarch64 \
             android/abi_gki_protected_exports_x86_64
 
-      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch
+      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch (skips patching if already in source)
       - name: Apply ADIOS I/O scheduler patch (6.1)
-        if: ${{ inputs.io_scheduler == 'adios' || inputs.io_scheduler == 'all' }}
+        if: ${{ env.IO_WANT_ADIOS == 'true' }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
-          if [ ! -f "${ADIOS_PATCH}" ]; then
-            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before selecting io_scheduler=adios or all."
-            exit 1
+          cd kernel
+
+          if grep -qE '^config[[:space:]]+(MQ_)?IOSCHED_ADIOS$' block/Kconfig* || compgen -G 'block/*adios*.c' >/dev/null; then
+            echo "Discarding ADIOS patch: ADIOS I/O scheduler is already present in kernel source."
+          else
+            ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
+            if [ ! -f "${ADIOS_PATCH}" ]; then
+              echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before selecting adios in io_scheduler."
+              exit 1
+            fi
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
           fi
 
-          cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
-
-          ADIOS_SYM="$(git diff -U0 -- block/Kconfig* | awk '/^\+config[[:space:]]+(MQ_)?IOSCHED_ADIOS$/ {print $2; exit}')"
+          ADIOS_SYM="$(grep -hE '^config[[:space:]]+(MQ_)?IOSCHED_ADIOS$' block/Kconfig* | awk '{print $2; exit}')"
           if [ -z "${ADIOS_SYM}" ]; then
-            echo "::error::ADIOS patch applied, but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
+            echo "::error::ADIOS patch applied (or detected), but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
             exit 1
           fi
           echo "Detected ADIOS Kconfig symbol: ${ADIOS_SYM}"
@@ -622,7 +664,7 @@ jobs:
       
       # Integrate CPQ I/O scheduler (Rasenkai/CPQ_IOSched) only if not already present in kernel source
       - name: Integrate CPQ I/O scheduler (6.1)
-        if: ${{ inputs.io_scheduler == 'cpq' || inputs.io_scheduler == 'all' }}
+        if: ${{ env.IO_WANT_CPQ == 'true' }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -670,26 +712,30 @@ jobs:
           grep -q '^config MQ_IOSCHED_CPQ$' block/Kconfig.iosched
           echo "CPQ_CONFIG_SYM=MQ_IOSCHED_CPQ" >> "${GITHUB_ENV}"    
 
-      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
+      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch (skips patching if already in source)
       - name: Apply KMI-safe BORE scheduler patch (6.1)
-        if: ${{ inputs.bore_scheduler != 'off' }}
+        if: ${{ inputs.bore_scheduler == 'boot-on' || inputs.bore_scheduler == 'boot-off' }}
         env:
           BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
-          if [ ! -f "${BORE_PATCH}" ]; then
-            echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling enable_bore."
-            exit 1
+          cd kernel
+
+          if grep -qE '^config[[:space:]]+SCHED_BORE$' init/Kconfig kernel/Kconfig* 2>/dev/null; then
+            echo "Discarding BORE patch: SCHED_BORE is already present in kernel source."
+          else
+            BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
+            if [ ! -f "${BORE_PATCH}" ]; then
+              echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling bore_scheduler."
+              exit 1
+            fi
+            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
           fi
 
-          cd kernel
-          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
-
-          BORE_SYM="$(git diff -U0 -- init/Kconfig kernel/Kconfig* | awk '/^\+config[[:space:]]+SCHED_BORE$/ {print $2; exit}')"
+          BORE_SYM="$(grep -hE '^config[[:space:]]+SCHED_BORE$' init/Kconfig kernel/Kconfig* 2>/dev/null | awk '{print $2; exit}')"
           if [ -z "${BORE_SYM}" ]; then
-            echo "::error::BORE patch applied, but no SCHED_BORE symbol was found in init/Kconfig or kernel/Kconfig*."
+            echo "::error::BORE patch applied (or detected), but no SCHED_BORE symbol was found in init/Kconfig or kernel/Kconfig*."
             exit 1
           fi
           echo "Detected BORE Kconfig symbol: ${BORE_SYM}"
@@ -701,13 +747,13 @@ jobs:
           fi
 
           mapfile -t BORE_FILES < <(grep -rlE '\bsched_bore[[:space:]]*=[[:space:]]*[01];' kernel/sched/)
-          if [ "${#BORE_FILES[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly 1 file initializing sched_bore in kernel/sched/, found ${#BORE_FILES[@]}."
-            exit 1
+          if [ "${#BORE_FILES[@]}" -eq 1 ]; then
+            BORE_SRC="${BORE_FILES[0]}"
+            sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
+            grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
+          else
+            echo "::warning::Expected 1 file initializing sched_bore in kernel/sched/, found ${#BORE_FILES[@]}; leaving boot default as-is."
           fi
-          BORE_SRC="${BORE_FILES[0]}"
-          sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
-          grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
 
       # Integrate Baseband-guard LSM (vc-teahouse/Baseband-guard) and add it to security/Kconfig defaults
       - name: Integrate Baseband-guard LSM
@@ -786,7 +832,7 @@ jobs:
             echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
           fi
 
-          # Dry-run and apply consolidated KMI-safe power, arm64, sched, and F2FS tweaks (6.1)
+      # Dry-run and apply consolidated KMI-safe power, arm64, sched, and F2FS tweaks (6.1)
       - name: Apply KMI-safe tweaks patch (6.1)
         if: ${{ inputs.enable_kmi_safe_tweaks }}
         run: |
@@ -889,12 +935,17 @@ jobs:
           fi
 
           # ADIOS I/O scheduler
-          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_ADIOS}" = "true" ]; then
             ./scripts/config --file out/.config -e "${ADIOS_CONFIG_SYM}"
           fi
 
-          # BORE CPU scheduler
-          if [ "${BORE_SCHEDULER}" != "off" ]; then
+          # BORE CPU scheduler (disabled = force off even if fork has BORE; stock = untouched)
+          if [ "${BORE_SCHEDULER}" = "disabled" ]; then
+            if grep -qE '^CONFIG_SCHED_BORE=y$' out/.config; then
+              echo "Disabling BORE scheduler: CONFIG_SCHED_BORE=n"
+              ./scripts/config --file out/.config -d SCHED_BORE
+            fi
+          elif [ "${BORE_SCHEDULER}" = "boot-on" ] || [ "${BORE_SCHEDULER}" = "boot-off" ]; then
             ./scripts/config --file out/.config -e "${BORE_CONFIG_SYM}"
           fi
 
@@ -1011,7 +1062,7 @@ jobs:
             fi
           fi
           # Kyber I/O scheduler (discard if already enabled/module in source)
-          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_KYBER}" = "true" ]; then
             if grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config; then
               echo "Discarding Kyber tweak: already enabled in source config ($(grep -E '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config))."
             else
@@ -1021,7 +1072,7 @@ jobs:
           fi
 
           # BFQ I/O scheduler (discard if already enabled/module in source)
-          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_BFQ}" = "true" ]; then
             if grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config; then
               echo "Discarding BFQ tweak: already enabled in source config ($(grep -E '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config))."
             else
@@ -1031,7 +1082,7 @@ jobs:
           fi
 
           # CPQ I/O scheduler (only enable when newly integrated by the workflow)
-          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if [ "${IO_WANT_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             if grep -qE "^CONFIG_${CPQ_CONFIG_SYM}=[ym]$" out/.config; then
               echo "Discarding CPQ tweak: already enabled in source config."
             else
@@ -1141,11 +1192,13 @@ jobs:
             grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
           fi
 
-          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_ADIOS}" = "true" ]; then
             grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
           fi
 
-          if [ "${BORE_SCHEDULER}" != "off" ]; then
+          if [ "${BORE_SCHEDULER}" = "disabled" ]; then
+            ! grep -qx 'CONFIG_SCHED_BORE=y' out/.config
+          elif [ "${BORE_SCHEDULER}" = "boot-on" ] || [ "${BORE_SCHEDULER}" = "boot-off" ]; then
             grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
           fi
 
@@ -1178,15 +1231,15 @@ jobs:
             grep -qx 'CONFIG_HZ_300=y' out/.config
             grep -qx 'CONFIG_HZ=300' out/.config
           fi
-          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_KYBER}" = "true" ]; then
             grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config
           fi
 
-          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
+          if [ "${IO_WANT_BFQ}" = "true" ]; then
             grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config
           fi
 
-          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if [ "${IO_WANT_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             grep -qx "CONFIG_${CPQ_CONFIG_SYM}=y" out/.config
           fi
           
@@ -1443,8 +1496,8 @@ jobs:
             echo "| **TCP Congestion** | \`${TCP_CONGESTION}\` | $([ "${TCP_CONGESTION}" = "stock" ] && echo "Stock" || echo "Applied") | \`${DEF_TCP:-unknown}\` |"
             echo "| **FQ Default Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${FQ_REQ}" "DEFAULT_FQ") | \`${DEF_QDISC:-unknown}\` |"
             echo "| **CAKE Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${CAKE_REQ}" "NET_SCH_CAKE") | \`CONFIG_NET_SCH_CAKE\` |"
-            echo "| **I/O Scheduler** | \`${IO_SCHEDULER}\` | $([ "${IO_SCHEDULER}" = "stock" ] && echo "Stock" || echo "Applied") | \`${IO_SCHEDULER}\` |"
-            echo "| **BORE Scheduler** | \`${BORE_SCHEDULER}\` | $([ "${BORE_SCHEDULER}" = "off" ] && echo "Disabled" || echo "Applied") | \`${BORE_SCHEDULER}\` |"
+            echo "| **I/O Scheduler** | \`${IO_SCHEDULER}\` | $([ "${IO_NORM}" = "stock" ] && echo "Stock" || echo "Applied") | \`${IO_NORM}\` |"
+            echo "| **BORE Scheduler** | \`${BORE_SCHEDULER}\` | $(case "${BORE_SCHEDULER}" in disabled) echo "Disabled (forced off)";; stock) echo "Stock (tree default)";; *) echo "Applied";; esac) | \`${BORE_SCHEDULER}\` |"
             echo "| **MGLRU** | \`${ENABLE_MGLRU}\` | $(status_for_all_syms "${ENABLE_MGLRU}" LRU_GEN LRU_GEN_ENABLED) | \`CONFIG_LRU_GEN_ENABLED\` |"
             echo "| **Lazy RCU** | \`${ENABLE_LAZY_RCU}\` | $(status_for_sym "${ENABLE_LAZY_RCU}" "RCU_LAZY") | \`CONFIG_RCU_LAZY\` |"
             echo "| **300 Hz Timer Tick** | \`${ENABLE_HZ_300}\` | $(status_for_sym "${ENABLE_HZ_300}" "HZ_300") | \`${DEF_HZ:-unknown} Hz\` |"
