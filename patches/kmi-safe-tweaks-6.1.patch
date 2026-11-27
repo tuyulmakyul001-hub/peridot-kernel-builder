@@ -153,17 +153,3 @@ index f395528175e74..f202335956920 100644
  	devkmsg_emit(facility, level, "%s", line);
  	kfree(buf);
  	return ret;
-
-diff --git a/kernel/irq/cpuhotplug.c b/kernel/irq/cpuhotplug.c
-index 755346ea98196..81a999db9ed25 100644
---- a/kernel/irq/cpuhotplug.c
-+++ b/kernel/irq/cpuhotplug.c
-@@ -147,7 +147,7 @@ static bool migrate_one_irq(struct irq_desc *desc)
- 	}
- 
- 	if (err) {
--		pr_warn_ratelimited("IRQ%u: set affinity failed(%d).\n",
-+		pr_debug_ratelimited("IRQ%u: set affinity failed(%d).\n",
- 				    d->irq, err);
- 		brokeaff = false;
- 	}
