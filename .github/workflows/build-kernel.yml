@@ -473,7 +473,7 @@ jobs:
 
           test -f drivers/kernelsu/Kconfig
 
-      # Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
+# Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
       - name: Apply SUSFS kernel patches (gki-android14-6.1)
         if: ${{ contains(inputs.root_variant, '-susfs') }}
         env:
@@ -490,28 +490,105 @@ jobs:
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
 
-          # If the kernel fork already merged SUSFS bootconfig spoofing into fs/proc/bootconfig.c,
-          # strip the fs/proc/bootconfig.c diff section from the patch so apply_patch_strict.sh
-          # does not fail on an already-present hunk.
-          if grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c 2>/dev/null; then
-            echo "Detected SUSFS bootconfig spoofing already present in fs/proc/bootconfig.c; stripping bootconfig.c hunk from SUSFS patch."
-            python3 - <<'PY'
+          # Test the fs/proc/bootconfig.c hunk alone first.
+          # Clean trees keep the stock patch; modified forks (e.g. hoshikv's is_global_init change)
+          # strip only bootconfig.c from the patch and inject the SUSFS hook directly.
+          python3 - <<'PY'
           from pathlib import Path
-          import os
+          import os, re, subprocess, tempfile
 
           patch_path = Path(os.environ["SUSFS_PATCH_FILE"])
+          bc_path = Path("fs/proc/bootconfig.c")
           raw = patch_path.read_text(encoding="utf-8", errors="replace")
-          marker = "diff --git a/fs/proc/bootconfig.c b/fs/proc/bootconfig.c\n"
-          idx = raw.find(marker)
-          if idx != -1:
-              next_idx = raw.find("\ndiff --git ", idx + len(marker))
-              if next_idx != -1:
-                  cleaned = raw[:idx] + raw[next_idx + 1:]
+
+          m_git = re.search(r"^diff --git a/fs/proc/bootconfig\.c b/fs/proc/bootconfig\.c\n", raw, re.M)
+          m_uni = re.search(r"^--- a/fs/proc/bootconfig\.c\b.*\n", raw, re.M)
+
+          if m_git:
+              idx = m_git.start()
+              next_m = re.search(r"\ndiff --git ", raw[m_git.end():])
+              end_idx = (m_git.end() + next_m.start() + 1) if next_m else len(raw)
+          elif m_uni:
+              idx = m_uni.start()
+              next_m = re.search(r"\n--- a/", raw[m_uni.end():])
+              end_idx = (m_uni.end() + next_m.start() + 1) if next_m else len(raw)
+          else:
+              raise SystemExit(0)
+
+          if not bc_path.exists():
+              raise SystemExit(0)
+
+          bc_hunk = raw[idx:end_idx]
+          rest_patch = raw[:idx] + raw[end_idx:]
+
+          with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as tf:
+              tf.write(bc_hunk)
+              tmp_hunk = tf.name
+
+          try:
+              dry = subprocess.run(
+                  ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tmp_hunk],
+                  capture_output=True,
+                  text=True,
+              )
+          finally:
+              os.unlink(tmp_hunk)
+
+          if dry.returncode == 0:
+              print("fs/proc/bootconfig.c hunk applies cleanly; keeping original SUSFS patch.")
+              raise SystemExit(0)
+
+          print("fs/proc/bootconfig.c hunk conflicted with kernel fork; stripping hunk and injecting SUSFS hook.")
+          patch_path.write_text(rest_patch, encoding="utf-8", newline="\n")
+
+          bc_src = bc_path.read_text(encoding="utf-8", errors="replace")
+          if "susfs_spoof_cmdline_or_bootconfig" in bc_src:
+              print("SUSFS bootconfig spoofing already present in fs/proc/bootconfig.c; skipping injection.")
+              raise SystemExit(0)
+
+          extern_block = (
+              "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+              "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n"
+              "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n"
+              "#endif\n\n"
+          )
+          hook_block = (
+              "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+              "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n"
+              "\t\tif (saved_boot_config) {\n"
+              "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n"
+              "\t\t\treturn 0;\n"
+              "\t\t}\n"
+              "\t}\n"
+              "#endif\n"
+          )
+
+          m_fn = re.search(r"(static\s+int\s+boot_config_proc_show\s*\([^)]*\)\s*\{\n)", bc_src)
+          if not m_fn:
+              raise SystemExit("::error::Could not locate boot_config_proc_show() in fs/proc/bootconfig.c.")
+
+          body_start = m_fn.end()
+          lines_after = bc_src[body_start:].splitlines(keepends=True)
+          insert_offset = 0
+          decl_re = re.compile(
+              r"^\s*(?:(?:const|static|unsigned|signed|struct|enum|char|int|long|short|size_t|ssize_t|bool|u8|u16|u32|u64)\b.*?;\s*$|/\*.*?\*/\s*$|//.*$|\s*$)"
+          )
+          for line in lines_after:
+              if decl_re.match(line):
+                  insert_offset += len(line)
               else:
-                  cleaned = raw[:idx]
-              patch_path.write_text(cleaned, encoding="utf-8", newline="\n")
+                  break
+
+          new_bc = (
+              bc_src[:m_fn.start()]
+              + extern_block
+              + bc_src[m_fn.start():body_start + insert_offset]
+              + hook_block
+              + bc_src[body_start + insert_offset:]
+          )
+          bc_path.write_text(new_bc, encoding="utf-8", newline="\n")
+          subprocess.run(["git", "diff", "--", "fs/proc/bootconfig.c"], check=False)
           PY
-          fi
 
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" \
             "${SUSFS_PATCH_FILE}"
