@@ -295,23 +295,31 @@ jobs:
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
-# Cache the extracted AOSP Clang/LLVM toolchain by revision so future runs skip downloading it
+# Cache AOSP Clang only on cloud runners (self-hosted keeps it permanently in ~/toolchains)
       - name: Cache AOSP Clang/LLVM toolchain
+        if: ${{ inputs.runner != 'self-hosted' }}
         id: cache-clang
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/clang
           key: aosp-clang-${{ env.CLANG_VERSION }}
 
-      # Download and verify AOSP Clang/LLVM only on a cache miss, then add it to PATH
+# Download and verify AOSP Clang/LLVM only if missing locally, then add it to PATH
       - name: Download AOSP Clang/LLVM toolchain
         env:
+          RUNNER_TYPE: ${{ inputs.runner }}
           CLANG_CACHE_HIT: ${{ steps.cache-clang.outputs.cache-hit }}
         run: |
           set -euxo pipefail
-          if [ "${CLANG_CACHE_HIT}" != "true" ] || [ ! -x "${RUNNER_TEMP}/clang/bin/clang" ]; then
-            rm -rf "${RUNNER_TEMP}/clang"
-            mkdir -p "${RUNNER_TEMP}/clang"
+          if [ "${RUNNER_TYPE}" = "self-hosted" ]; then
+            CLANG_DIR="${HOME}/toolchains/clang-${CLANG_VERSION}"
+          else
+            CLANG_DIR="${RUNNER_TEMP}/clang"
+          fi
+
+          if [ ! -x "${CLANG_DIR}/bin/clang" ]; then
+            rm -rf "${CLANG_DIR}"
+            mkdir -p "${CLANG_DIR}"
             DOWNLOADED=0
             for REF in refs/heads/main refs/heads/main-kernel refs/heads/android14-release; do
               URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-${CLANG_VERSION}.tar.gz"
@@ -330,13 +338,13 @@ jobs:
               echo "::error::Could not download a valid clang-${CLANG_VERSION} archive from AOSP."
               exit 1
             fi
-            tar -xzf "${RUNNER_TEMP}/clang.tar.gz" -C "${RUNNER_TEMP}/clang"
+            tar -xzf "${RUNNER_TEMP}/clang.tar.gz" -C "${CLANG_DIR}"
             rm -f "${RUNNER_TEMP}/clang.tar.gz"
           else
-            echo "Using cached clang-${CLANG_VERSION} from ${RUNNER_TEMP}/clang"
+            echo "Using saved clang-${CLANG_VERSION} from ${CLANG_DIR}"
           fi
-          "${RUNNER_TEMP}/clang/bin/clang" --version
-          echo "${RUNNER_TEMP}/clang/bin" >> "${GITHUB_PATH}"
+          "${CLANG_DIR}/bin/clang" --version
+          echo "${CLANG_DIR}/bin" >> "${GITHUB_PATH}"
 
       # Prepare compiler flags for O2/O3 and probe Clang at -O2 for MLGO register allocation support
       - name: Prepare compiler flags (O2/O3 and MLGO)
