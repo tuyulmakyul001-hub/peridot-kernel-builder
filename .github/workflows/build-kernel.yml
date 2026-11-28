@@ -3,6 +3,14 @@ name: Build POCO F6 (peridot) LineageOS 24.0 Kernel
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: "Build runner (self-hosted = your PC WSL2; ubuntu-latest = GitHub cloud)"
+        required: true
+        type: choice
+        default: "self-hosted"
+        options:
+          - self-hosted
+          - ubuntu-latest
       kernel_repo:
         description: "Public GitHub kernel repo (owner/repo)"
         required: true
@@ -65,18 +73,24 @@ on:
         type: boolean
         default: true
       io_scheduler:
-        description: "Extra I/O schedulers (comma-separated: stock, all, or any mix of adios,cpq,kyber,bfq)"
-        required: false
-        type: string
-        default: "stock"
-      bore_scheduler:
-        description: "BORE CPU scheduler (disabled = force off; stock = keep tree default; boot-on/boot-off = patch & enable)"
+        description: "Extra I/O scheduler to integrate/enable (all = ADIOS + CPQ + Kyber + BFQ)"
         required: false
         type: choice
-        default: "disabled"
+        default: "stock"
         options:
-          - disabled
           - stock
+          - adios
+          - cpq
+          - kyber
+          - bfq
+          - all
+      bore_scheduler:
+        description: "KMI-safe BORE CPU scheduler on 6.1 (requires patches/bore-6.1-kmi-safe.patch)"
+        required: false
+        type: choice
+        default: "off"
+        options:
+          - off
           - boot-on
           - boot-off
       enable_baseband_guard:
@@ -123,38 +137,13 @@ on:
         required: false
         type: boolean
         default: false
-      cpu_governors:
-        description: "Extra official 6.1 CPU governors (ondemand, userspace, or both; skips if already in source)"
-        required: false
-        type: choice
-        default: "all"
-        options:
-          - stock
-          - ondemand
-          - userspace
-          - all
-      enable_ttl_mangling:
-        description: "Enable hotspot TTL/HL mangling (IP_NF_TARGET_TTL/IP6_NF_TARGET_HL/XT_HL; skips if already in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_ntfs3:
-        description: "Enable native in-kernel NTFS3 read/write filesystem (CONFIG_NTFS3_FS; skips if already in source)"
-        required: false
-        type: boolean
-        default: false
-      enable_kmi_safe_tweaks:
-        description: "Apply consolidated KMI-safe power/arm64/sched/F2FS tweaks (requires patches/kmi-safe-tweaks-6.1.patch)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 180
     defaults:
       run:
@@ -163,6 +152,7 @@ jobs:
     steps:
       # Free up disk space on the GitHub-hosted runner before cloning and compiling
       - name: Free up disk space
+        if: ${{ inputs.runner != 'self-hosted' }}
         run: |
           set -euxo pipefail
           df -h
@@ -175,6 +165,7 @@ jobs:
 
       # Install required host tools, compiler helpers, ccache, pahole (dwarves), gawk, and zip utilities
       - name: Install build dependencies
+        if: ${{ inputs.runner != 'self-hosted' }}
         run: |
           set -euxo pipefail
           sudo apt-get update
@@ -219,6 +210,7 @@ jobs:
             echo "::error::kernel_repo must be in 'owner/repo' format."
             exit 1
           fi
+          rm -rf kernel artifacts build.log
           git clone --depth=1 --single-branch --branch "${KERNEL_BRANCH}" \
             "https://github.com/${KERNEL_REPO}.git" \
             kernel
@@ -242,10 +234,6 @@ jobs:
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
           NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
-          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
-          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
-          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
-          ENABLE_KMI_SAFE_TWEAKS: ${{ inputs.enable_kmi_safe_tweaks }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -281,8 +269,6 @@ jobs:
 
           SHORT_COMMIT="$(git rev-parse --short=7 HEAD)"
           BUILD_DATE="$(date -u +%Y%m%d)"
-          BUILD_TIME="$(date -u +%H%M%S)"
-          RUN_TAG="r${GITHUB_RUN_NUMBER:-0}a${GITHUB_RUN_ATTEMPT:-1}"
 
           LOCAL_SUFFIX="${RAW_LOCAL_VERSION#-}"
           if [ -n "${LOCAL_SUFFIX}" ]; then
@@ -295,71 +281,17 @@ jobs:
             KERNEL_NAME="peridot-los24"
           fi
 
-          # Parse comma-separated io_scheduler list (supports stock, all, or any combination of adios,cpq,kyber,bfq)
-          IO_WANT_ADIOS="false"
-          IO_WANT_CPQ="false"
-          IO_WANT_KYBER="false"
-          IO_WANT_BFQ="false"
-          RAW_IO="$(printf '%s' "${IO_SCHEDULER}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-          if [ -z "${RAW_IO}" ] || [ "${RAW_IO}" = "stock" ] || [ "${RAW_IO}" = "none" ]; then
-            IO_NORM="stock"
-          else
-            IFS=',' read -ra IO_TOKENS <<< "${RAW_IO}"
-            for tok in "${IO_TOKENS[@]}"; do
-              [ -z "${tok}" ] && continue
-              case "${tok}" in
-                stock|none) ;;
-                all)
-                  IO_WANT_ADIOS="true"
-                  IO_WANT_CPQ="true"
-                  IO_WANT_KYBER="true"
-                  IO_WANT_BFQ="true"
-                  ;;
-                adios) IO_WANT_ADIOS="true" ;;
-                cpq)   IO_WANT_CPQ="true" ;;
-                kyber) IO_WANT_KYBER="true" ;;
-                bfq)   IO_WANT_BFQ="true" ;;
-                *)
-                  echo "::error::Unsupported io_scheduler token '${tok}'. Allowed values: stock, all, adios, cpq, kyber, bfq (comma-separated)."
-                  exit 1
-                  ;;
-              esac
-            done
-            IO_LIST=()
-            [ "${IO_WANT_ADIOS}" = "true" ] && IO_LIST+=(adios)
-            [ "${IO_WANT_CPQ}" = "true" ]   && IO_LIST+=(cpq)
-            [ "${IO_WANT_KYBER}" = "true" ] && IO_LIST+=(kyber)
-            [ "${IO_WANT_BFQ}" = "true" ]   && IO_LIST+=(bfq)
-            if [ "${#IO_LIST[@]}" -eq 0 ]; then
-              IO_NORM="stock"
-            elif [ "${#IO_LIST[@]}" -eq 4 ]; then
-              IO_NORM="all"
-            else
-              IO_NORM="$(IFS='-'; echo "${IO_LIST[*]}")"
-            fi
-          fi
-          echo "Normalized io_scheduler: ${IO_NORM} (adios=${IO_WANT_ADIOS}, cpq=${IO_WANT_CPQ}, kyber=${IO_WANT_KYBER}, bfq=${IO_WANT_BFQ})"
-
-          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_NORM}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}-kmitwk-${ENABLE_KMI_SAFE_TWEAKS}"
-          ARTIFACT_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${BUILD_TIME}-${RUN_TAG}-${SHORT_COMMIT}"
-          ZIP_NAME="${ARTIFACT_NAME}.zip"
+          FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_SCHEDULER}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}"
+          ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
 
           {
             echo "KERNEL_VERSION=${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
             echo "CLANG_VERSION=${CLANG_VERSION}"
             echo "SHORT_COMMIT=${SHORT_COMMIT}"
             echo "BUILD_DATE=${BUILD_DATE}"
-            echo "BUILD_TIME=${BUILD_TIME}"
-            echo "RUN_TAG=${RUN_TAG}"
             echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
             echo "KERNEL_NAME=${KERNEL_NAME}"
-            echo "IO_NORM=${IO_NORM}"
-            echo "IO_WANT_ADIOS=${IO_WANT_ADIOS}"
-            echo "IO_WANT_CPQ=${IO_WANT_CPQ}"
-            echo "IO_WANT_KYBER=${IO_WANT_KYBER}"
-            echo "IO_WANT_BFQ=${IO_WANT_BFQ}"
             echo "FEATURE_TAG=${FEATURE_TAG}"
-            echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
@@ -455,26 +387,12 @@ jobs:
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
 
-      # Restore and persist ThinLTO linker cache between workflow runs
-      - name: Cache ThinLTO
-        uses: actions/cache@v5
-        with:
-          path: kernel/out/.thinlto-cache
-          key: thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
-          restore-keys: |
-            thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
-            thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
-
-      # Set ccache size limits, runner-friendly sloppiness, and zero out per-run statistics
+      # Set ccache size limits and zero out per-run statistics
       - name: Configure ccache
         run: |
           set -euxo pipefail
           ccache --set-config=max_size=4G
           ccache --set-config=compression=true
-          ccache --set-config=compression_level=1
-          ccache --set-config=hash_dir=false
-          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
-          ccache --set-config=base_dir="${GITHUB_WORKSPACE}/kernel"
           ccache -z
 
       # Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
@@ -540,8 +458,6 @@ jobs:
       # Strictly dry-run and apply simonpunk SUSFS gki-android14-6.1 patches for all SUSFS root variants
       - name: Apply SUSFS kernel patches (gki-android14-6.1)
         if: ${{ contains(inputs.root_variant, '-susfs') }}
-        env:
-          SUSFS_PATCH_FILE: ${{ runner.temp }}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
@@ -554,129 +470,31 @@ jobs:
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/fs/"* fs/
           cp -v "${RUNNER_TEMP}/susfs4ksu/kernel_patches/include/linux/"* include/linux/
 
-          # Handle fs/proc/bootconfig.c context drift on custom forks (e.g. non-SUSFS bootconfig patches):
-          # test the bootconfig.c hunk first; only if it fails dry-run, strip it and inject SUSFS
-          # directly into boot_config_proc_show() (unless already present).
-          python3 - <<'PY'
-          from pathlib import Path
-          import os, re, subprocess, tempfile
-
-          patch_path = Path(os.environ["SUSFS_PATCH_FILE"])
-          bc_path = Path("fs/proc/bootconfig.c")
-          raw = patch_path.read_text(encoding="utf-8", errors="replace")
-          marker = "diff --git a/fs/proc/bootconfig.c b/fs/proc/bootconfig.c\n"
-          idx = raw.find(marker)
-          if idx == -1 or not bc_path.exists():
-              raise SystemExit(0)
-
-          next_idx = raw.find("\ndiff --git ", idx + len(marker))
-          if next_idx != -1:
-              bc_hunk = raw[idx:next_idx + 1]
-              rest_patch = raw[:idx] + raw[next_idx + 1:]
-          else:
-              bc_hunk = raw[idx:]
-              rest_patch = raw[:idx]
-
-          with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as tf:
-              tf.write(bc_hunk)
-              tmp_hunk = tf.name
-
-          try:
-              dry = subprocess.run(
-                  ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tmp_hunk],
-                  capture_output=True,
-                  text=True,
-              )
-          finally:
-              os.unlink(tmp_hunk)
-
-          if dry.returncode == 0:
-              print("fs/proc/bootconfig.c hunk applies cleanly; keeping original SUSFS patch.")
-              raise SystemExit(0)
-
-          print("fs/proc/bootconfig.c hunk conflicted with kernel fork; stripping hunk from SUSFS patch.")
-          patch_path.write_text(rest_patch, encoding="utf-8", newline="\n")
-
-          bc_src = bc_path.read_text(encoding="utf-8", errors="replace")
-          if "susfs_spoof_cmdline_or_bootconfig" in bc_src:
-              print("SUSFS bootconfig spoofing already present in fs/proc/bootconfig.c; skipping injection.")
-              raise SystemExit(0)
-
-          extern_block = (
-              "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
-              "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n"
-              "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n"
-              "#endif\n\n"
-          )
-          hook_block = (
-              "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
-              "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n"
-              "\t\tif (saved_boot_config) {\n"
-              "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n"
-              "\t\t\treturn 0;\n"
-              "\t\t}\n"
-              "\t}\n"
-              "#endif\n"
-          )
-
-          m = re.search(r"(static\s+int\s+boot_config_proc_show\s*\([^)]*\)\s*\{\n)", bc_src)
-          if not m:
-              raise SystemExit("::error::Could not locate boot_config_proc_show() in fs/proc/bootconfig.c for fallback SUSFS injection.")
-
-          # Place extern declarations right before boot_config_proc_show()
-          # and place the runtime hook after any leading local variable declarations
-          # to satisfy -Wdeclaration-after-statement.
-          body_start = m.end()
-          lines_after = bc_src[body_start:].splitlines(keepends=True)
-          insert_offset = 0
-          decl_re = re.compile(r"^\s*(?:(?:const|static|unsigned|signed|struct|enum|char|int|long|short|size_t|ssize_t|bool|u8|u16|u32|u64)\b.*?;\s*$|/\*.*?\*/\s*$|//.*$|\s*$)")
-          for line in lines_after:
-              if decl_re.match(line):
-                  insert_offset += len(line)
-              else:
-                  break
-
-          new_bc = (
-              bc_src[:m.start()]
-              + extern_block
-              + bc_src[m.start():body_start + insert_offset]
-              + hook_block
-              + bc_src[body_start + insert_offset:]
-          )
-          bc_path.write_text(new_bc, encoding="utf-8", newline="\n")
-          print("Injected SUSFS bootconfig spoofing into fs/proc/bootconfig.c:")
-          subprocess.run(["git", "diff", "--", "fs/proc/bootconfig.c"], check=False)
-          PY
-
           "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" \
-            "${SUSFS_PATCH_FILE}"
+            "${RUNNER_TEMP}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
 
           rm -fv \
             android/abi_gki_protected_exports_aarch64 \
             android/abi_gki_protected_exports_x86_64
 
-      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch (skips patching if already in source)
+      # Dry-run and apply local Linux 6.1 ADIOS I/O scheduler patch
       - name: Apply ADIOS I/O scheduler patch (6.1)
-        if: ${{ env.IO_WANT_ADIOS == 'true' }}
+        if: ${{ inputs.io_scheduler == 'adios' || inputs.io_scheduler == 'all' }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          cd kernel
-
-          if grep -qE '^config[[:space:]]+(MQ_)?IOSCHED_ADIOS$' block/Kconfig* || compgen -G 'block/*adios*.c' >/dev/null; then
-            echo "Discarding ADIOS patch: ADIOS I/O scheduler is already present in kernel source."
-          else
-            ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
-            if [ ! -f "${ADIOS_PATCH}" ]; then
-              echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before selecting adios in io_scheduler."
-              exit 1
-            fi
-            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
+          ADIOS_PATCH="${GITHUB_WORKSPACE}/builder/patches/adios-6.1.patch"
+          if [ ! -f "${ADIOS_PATCH}" ]; then
+            echo "::error::Missing patches/adios-6.1.patch in your builder repository. Add a verified Linux 6.1 ADIOS patch there before selecting io_scheduler=adios or all."
+            exit 1
           fi
 
-          ADIOS_SYM="$(grep -hE '^config[[:space:]]+(MQ_)?IOSCHED_ADIOS$' block/Kconfig* | awk '{print $2; exit}')"
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${ADIOS_PATCH}"
+
+          ADIOS_SYM="$(git diff -U0 -- block/Kconfig* | awk '/^\+config[[:space:]]+(MQ_)?IOSCHED_ADIOS$/ {print $2; exit}')"
           if [ -z "${ADIOS_SYM}" ]; then
-            echo "::error::ADIOS patch applied (or detected), but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
+            echo "::error::ADIOS patch applied, but no MQ_IOSCHED_ADIOS or IOSCHED_ADIOS symbol was found in block/Kconfig*."
             exit 1
           fi
           echo "Detected ADIOS Kconfig symbol: ${ADIOS_SYM}"
@@ -684,7 +502,7 @@ jobs:
       
       # Integrate CPQ I/O scheduler (Rasenkai/CPQ_IOSched) only if not already present in kernel source
       - name: Integrate CPQ I/O scheduler (6.1)
-        if: ${{ env.IO_WANT_CPQ == 'true' }}
+        if: ${{ inputs.io_scheduler == 'cpq' || inputs.io_scheduler == 'all' }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -732,30 +550,26 @@ jobs:
           grep -q '^config MQ_IOSCHED_CPQ$' block/Kconfig.iosched
           echo "CPQ_CONFIG_SYM=MQ_IOSCHED_CPQ" >> "${GITHUB_ENV}"    
 
-      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch (skips patching if already in source)
+      # Dry-run and apply local KMI-safe Linux 6.1 BORE scheduler patch and set sched_bore boot default
       - name: Apply KMI-safe BORE scheduler patch (6.1)
-        if: ${{ inputs.bore_scheduler == 'boot-on' || inputs.bore_scheduler == 'boot-off' }}
+        if: ${{ inputs.bore_scheduler != 'off' }}
         env:
           BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
         run: |
           set -euxo pipefail
           chmod +x "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh"
-          cd kernel
-
-          if grep -qE '^config[[:space:]]+SCHED_BORE$' init/Kconfig kernel/Kconfig* 2>/dev/null; then
-            echo "Discarding BORE patch: SCHED_BORE is already present in kernel source."
-          else
-            BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
-            if [ ! -f "${BORE_PATCH}" ]; then
-              echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling bore_scheduler."
-              exit 1
-            fi
-            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
+          BORE_PATCH="${GITHUB_WORKSPACE}/builder/patches/bore-6.1-kmi-safe.patch"
+          if [ ! -f "${BORE_PATCH}" ]; then
+            echo "::error::Missing patches/bore-6.1-kmi-safe.patch in your builder repository. Add a verified KMI-safe Linux 6.1 BORE patch there before enabling enable_bore."
+            exit 1
           fi
 
-          BORE_SYM="$(grep -hE '^config[[:space:]]+SCHED_BORE$' init/Kconfig kernel/Kconfig* 2>/dev/null | awk '{print $2; exit}')"
+          cd kernel
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${BORE_PATCH}"
+
+          BORE_SYM="$(git diff -U0 -- init/Kconfig kernel/Kconfig* | awk '/^\+config[[:space:]]+SCHED_BORE$/ {print $2; exit}')"
           if [ -z "${BORE_SYM}" ]; then
-            echo "::error::BORE patch applied (or detected), but no SCHED_BORE symbol was found in init/Kconfig or kernel/Kconfig*."
+            echo "::error::BORE patch applied, but no SCHED_BORE symbol was found in init/Kconfig or kernel/Kconfig*."
             exit 1
           fi
           echo "Detected BORE Kconfig symbol: ${BORE_SYM}"
@@ -767,13 +581,13 @@ jobs:
           fi
 
           mapfile -t BORE_FILES < <(grep -rlE '\bsched_bore[[:space:]]*=[[:space:]]*[01];' kernel/sched/)
-          if [ "${#BORE_FILES[@]}" -eq 1 ]; then
-            BORE_SRC="${BORE_FILES[0]}"
-            sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
-            grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
-          else
-            echo "::warning::Expected 1 file initializing sched_bore in kernel/sched/, found ${#BORE_FILES[@]}; leaving boot default as-is."
+          if [ "${#BORE_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly 1 file initializing sched_bore in kernel/sched/, found ${#BORE_FILES[@]}."
+            exit 1
           fi
+          BORE_SRC="${BORE_FILES[0]}"
+          sed -i -E "s/(\bsched_bore[[:space:]]*=[[:space:]]*)[01];/\1${DESIRED_BORE_VAL};/" "${BORE_SRC}"
+          grep -nE "\bsched_bore[[:space:]]*=[[:space:]]*${DESIRED_BORE_VAL};" "${BORE_SRC}"
 
       # Integrate Baseband-guard LSM (vc-teahouse/Baseband-guard) and add it to security/Kconfig defaults
       - name: Integrate Baseband-guard LSM
@@ -804,11 +618,7 @@ jobs:
           test -f "${PATCH_PATH}"
 
           cd kernel
-          if patch --batch --reverse --dry-run -p1 -i "${PATCH_PATH}" >/dev/null 2>&1; then
-            echo "Skipping Droidspaces kABI padding patch: already applied in kernel source."
-          else
-            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
-          fi
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${PATCH_PATH}"
 
       # Dry-run and apply the 6.1 Unicode zero-width path bypass fix (gki_ptrace.patch omitted: already fixed in 6.1)
       - name: Apply 6.1 Unicode path bypass fix
@@ -824,11 +634,7 @@ jobs:
           test -f "${UNICODE_PATCH}"
 
           cd kernel
-          if patch --batch --reverse --dry-run -p1 -i "${UNICODE_PATCH}" >/dev/null 2>&1; then
-            echo "Skipping 6.1 Unicode path bypass fix: already applied in kernel source."
-          else
-            "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
-          fi
+          "${GITHUB_WORKSPACE}/builder/scripts/apply_patch_strict.sh" "${UNICODE_PATCH}"
           # Dry-run and apply local KMI-safe Linux 6.1 BBRv3 patch (discards if BBRv3 is already in source)
       
       - name: Apply KMI-safe BBRv3 patch (6.1)
@@ -860,97 +666,6 @@ jobs:
             echo "BBRV3_CONG_NAME=bbr" >> "${GITHUB_ENV}"
           fi
 
-      # Per-file source-aware apply for consolidated KMI-safe tweaks (skips files already applied or customized in fork)
-      - name: Apply KMI-safe tweaks patch (6.1)
-        if: ${{ inputs.enable_kmi_safe_tweaks }}
-        env:
-          TWEAKS_PATCH: ${{ github.workspace }}/builder/patches/kmi-safe-tweaks-6.1.patch
-        run: |
-          set -euxo pipefail
-          if [ ! -f "${TWEAKS_PATCH}" ]; then
-            echo "::error::Missing patches/kmi-safe-tweaks-6.1.patch in your builder repository."
-            exit 1
-          fi
-          cd kernel
-          python3 - <<'PY'
-          from pathlib import Path
-          import os, re, subprocess, tempfile
-
-          patch_path = Path(os.environ["TWEAKS_PATCH"])
-          raw = patch_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
-
-          # Split multi-file patch into individual per-file diff sections
-          starts = [m.start() for m in re.finditer(r"^diff --git ", raw, re.M)]
-          if not starts:
-              raise SystemExit("::error::No 'diff --git' sections found in patches/kmi-safe-tweaks-6.1.patch.")
-
-          sections = []
-          for idx, start in enumerate(starts):
-              end = starts[idx + 1] if idx + 1 < len(starts) else len(raw)
-              chunk = raw[start:end]
-              m_file = re.match(r"^diff --git a/\S+ b/(\S+)", chunk)
-              target = m_file.group(1) if m_file else f"section_{idx + 1}"
-              sections.append((target, chunk))
-
-          applied = []
-          already = []
-          conflicted = []
-
-          for target, chunk in sections:
-              with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as tf:
-                  tf.write(chunk)
-                  tmp = tf.name
-              try:
-                  rev = subprocess.run(
-                      ["patch", "--batch", "--reverse", "--dry-run", "-p1", "-i", tmp],
-                      capture_output=True,
-                      text=True,
-                  )
-                  if rev.returncode == 0:
-                      print(f"SKIPPED (already applied in source): {target}")
-                      already.append(target)
-                      continue
-
-                  fwd = subprocess.run(
-                      ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tmp],
-                      capture_output=True,
-                      text=True,
-                  )
-                  if fwd.returncode == 0:
-                      res = subprocess.run(
-                          ["patch", "--batch", "--forward", "-p1", "-i", tmp],
-                          capture_output=True,
-                          text=True,
-                      )
-                      if res.returncode != 0:
-                          print(res.stdout)
-                          print(res.stderr)
-                          raise SystemExit(f"::error::Patch failed after clean dry-run for {target}")
-                      print(f"APPLIED: {target}")
-                      applied.append(target)
-                  else:
-                      print(f"::warning::SKIPPED (already modified or context conflict in source): {target}")
-                      conflicted.append(target)
-              finally:
-                  os.unlink(tmp)
-
-          total = len(sections)
-          summary = f"Applied {len(applied)}/{total}"
-          details = []
-          if already:
-              details.append(f"{len(already)} already in source")
-          if conflicted:
-              details.append(f"{len(conflicted)} skipped on conflict")
-          if details:
-              summary += " (" + ", ".join(details) + ")"
-          print(f"KMI-safe tweaks summary: {summary}")
-
-          gh_env = os.environ.get("GITHUB_ENV")
-          if gh_env:
-              with open(gh_env, "a", encoding="utf-8") as ef:
-                  ef.write(f"KMI_TWEAKS_STATUS={summary}\n")
-          PY
-
       # Merge gki_defconfig with SM8635/peridot vendor fragments and enable selected GKI-safe options
       - name: Configure kernel (.config)
         env:
@@ -964,9 +679,6 @@ jobs:
           ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
           NET_QDISC: ${{ inputs.net_qdisc }}
           ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
-          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
-          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
-          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
         run: |
           set -euxo pipefail
           cd kernel
@@ -987,8 +699,6 @@ jobs:
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/peridot_GKI.config
-
-          cp out/.config "${RUNNER_TEMP}/base.config"
 
           # Root, SUSFS, and KPM options
           if [ "${ROOT_VARIANT}" != "none" ]; then
@@ -1040,17 +750,12 @@ jobs:
           fi
 
           # ADIOS I/O scheduler
-          if [ "${IO_WANT_ADIOS}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             ./scripts/config --file out/.config -e "${ADIOS_CONFIG_SYM}"
           fi
 
-          # BORE CPU scheduler (disabled = force off even if fork has BORE; stock = untouched)
-          if [ "${BORE_SCHEDULER}" = "disabled" ]; then
-            if grep -qE '^CONFIG_SCHED_BORE=y$' out/.config; then
-              echo "Disabling BORE scheduler: CONFIG_SCHED_BORE=n"
-              ./scripts/config --file out/.config -d SCHED_BORE
-            fi
-          elif [ "${BORE_SCHEDULER}" = "boot-on" ] || [ "${BORE_SCHEDULER}" = "boot-off" ]; then
+          # BORE CPU scheduler
+          if [ "${BORE_SCHEDULER}" != "off" ]; then
             ./scripts/config --file out/.config -e "${BORE_CONFIG_SYM}"
           fi
 
@@ -1134,20 +839,16 @@ jobs:
 
           # Fair Queue (fq) default network qdisc (discard if already applied in source)
           if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then
-            if grep -qx 'CONFIG_NET_SCH_DEFAULT=y' out/.config && grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
+            if grep -qx 'CONFIG_DEFAULT_FQ=y' out/.config && grep -qx 'CONFIG_DEFAULT_NET_SCH="fq"' out/.config; then
               echo "Skipping FQ default qdisc: already set to fq in source config."
             else
-              echo "Applying FQ default qdisc tweak: CONFIG_NET_SCH_DEFAULT=y, CONFIG_NET_SCH_FQ=y, CONFIG_DEFAULT_FQ=y"
+              echo "Applying FQ default qdisc tweak: CONFIG_NET_SCH_FQ=y, CONFIG_DEFAULT_FQ=y"
               ./scripts/config --file out/.config \
                 -e NET_SCHED \
-                -e NET_SCH_DEFAULT \
                 -e NET_SCH_FQ \
-                -d DEFAULT_CODEL \
                 -d DEFAULT_FQ_CODEL \
-                -d DEFAULT_FQ_PIE \
                 -d DEFAULT_PFIFO_FAST \
                 -d DEFAULT_SFQ \
-                -d DEFAULT_CAKE \
                 -e DEFAULT_FQ \
                 --set-str DEFAULT_NET_SCH fq
             fi
@@ -1167,7 +868,7 @@ jobs:
             fi
           fi
           # Kyber I/O scheduler (discard if already enabled/module in source)
-          if [ "${IO_WANT_KYBER}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             if grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config; then
               echo "Discarding Kyber tweak: already enabled in source config ($(grep -E '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config))."
             else
@@ -1177,7 +878,7 @@ jobs:
           fi
 
           # BFQ I/O scheduler (discard if already enabled/module in source)
-          if [ "${IO_WANT_BFQ}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             if grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config; then
               echo "Discarding BFQ tweak: already enabled in source config ($(grep -E '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config))."
             else
@@ -1187,7 +888,7 @@ jobs:
           fi
 
           # CPQ I/O scheduler (only enable when newly integrated by the workflow)
-          if [ "${IO_WANT_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             if grep -qE "^CONFIG_${CPQ_CONFIG_SYM}=[ym]$" out/.config; then
               echo "Discarding CPQ tweak: already enabled in source config."
             else
@@ -1228,51 +929,6 @@ jobs:
             fi
           fi
 
-          # Official ondemand CPU governor (discard if already enabled/module in source)
-          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
-            if grep -qE '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config; then
-              echo "Discarding ondemand governor: already enabled in source config ($(grep -E '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config))."
-            else
-              echo "Applying CPU governor: CONFIG_CPU_FREQ_GOV_ONDEMAND=y"
-              ./scripts/config --file out/.config -e CPU_FREQ_GOV_ONDEMAND
-            fi
-          fi
-
-          # Official userspace CPU governor (discard if already enabled/module in source)
-          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
-            if grep -qE '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config; then
-              echo "Discarding userspace governor: already enabled in source config ($(grep -E '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config))."
-            else
-              echo "Applying CPU governor: CONFIG_CPU_FREQ_GOV_USERSPACE=y"
-              ./scripts/config --file out/.config -e CPU_FREQ_GOV_USERSPACE
-            fi
-          fi
-
-          # Hotspot TTL/HL mangling (discard symbols already enabled/module in source)
-          if [ "${ENABLE_TTL_MANGLING}" = "true" ]; then
-            for sym in NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL; do
-              if grep -qE "^CONFIG_${sym}=[ym]$" out/.config; then
-                echo "Discarding CONFIG_${sym}: already enabled in source config."
-              else
-                echo "Applying TTL/HL mangling: CONFIG_${sym}=y"
-                ./scripts/config --file out/.config -e "${sym}"
-              fi
-            done
-          fi
-
-          # Native NTFS3 read/write filesystem (discard if already enabled/module in source)
-          if [ "${ENABLE_NTFS3}" = "true" ]; then
-            if grep -qE '^CONFIG_NTFS3_FS=[ym]$' out/.config; then
-              echo "Discarding NTFS3 tweak: already enabled in source config ($(grep -E '^CONFIG_NTFS3_FS=[ym]$' out/.config))."
-            else
-              echo "Applying NTFS3 filesystem: CONFIG_NTFS3_FS=y, CONFIG_NTFS3_LZX_XPRESS=y, CONFIG_NTFS3_FS_POSIX_ACL=y"
-              ./scripts/config --file out/.config \
-                -e NTFS3_FS \
-                -e NTFS3_LZX_XPRESS \
-                -e NTFS3_FS_POSIX_ACL
-            fi
-          fi
-
           make "${MAKE_ARGS[@]}" olddefconfig
           if [ "${ENABLE_MGLRU}" = "true" ]; then
             grep -qx 'CONFIG_LRU_GEN=y' out/.config
@@ -1297,13 +953,11 @@ jobs:
             grep -qx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
           fi
 
-          if [ "${IO_WANT_ADIOS}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "adios" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qx "CONFIG_${ADIOS_CONFIG_SYM}=y" out/.config
           fi
 
-          if [ "${BORE_SCHEDULER}" = "disabled" ]; then
-            ! grep -qx 'CONFIG_SCHED_BORE=y' out/.config
-          elif [ "${BORE_SCHEDULER}" = "boot-on" ] || [ "${BORE_SCHEDULER}" = "boot-off" ]; then
+          if [ "${BORE_SCHEDULER}" != "off" ]; then
             grep -qx "CONFIG_${BORE_CONFIG_SYM}=y" out/.config
           fi
 
@@ -1336,15 +990,15 @@ jobs:
             grep -qx 'CONFIG_HZ_300=y' out/.config
             grep -qx 'CONFIG_HZ=300' out/.config
           fi
-          if [ "${IO_WANT_KYBER}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "kyber" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qE '^CONFIG_MQ_IOSCHED_KYBER=[ym]$' out/.config
           fi
 
-          if [ "${IO_WANT_BFQ}" = "true" ]; then
+          if [ "${IO_SCHEDULER}" = "bfq" ] || [ "${IO_SCHEDULER}" = "all" ]; then
             grep -qE '^CONFIG_IOSCHED_BFQ=[ym]$' out/.config
           fi
 
-          if [ "${IO_WANT_CPQ}" = "true" ] && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
+          if { [ "${IO_SCHEDULER}" = "cpq" ] || [ "${IO_SCHEDULER}" = "all" ]; } && [ -n "${CPQ_CONFIG_SYM:-}" ]; then
             grep -qx "CONFIG_${CPQ_CONFIG_SYM}=y" out/.config
           fi
           
@@ -1357,28 +1011,9 @@ jobs:
             grep -qE '^CONFIG_NET_SCH_CAKE=[ym]$' out/.config
           fi
 
-          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
-            grep -qE '^CONFIG_CPU_FREQ_GOV_ONDEMAND=[ym]$' out/.config
-          fi
-
-          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then
-            grep -qE '^CONFIG_CPU_FREQ_GOV_USERSPACE=[ym]$' out/.config
-          fi
-
-          if [ "${ENABLE_TTL_MANGLING}" = "true" ]; then
-            for sym in NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL; do
-              grep -qE "^CONFIG_${sym}=[ym]$" out/.config
-            done
-          fi
-
-          if [ "${ENABLE_NTFS3}" = "true" ]; then
-            grep -qE '^CONFIG_NTFS3_FS=[ym]$' out/.config
-          fi
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
       - name: Build kernel Image
-        env:
-          KBUILD_BUILD_TIMESTAMP: "Thu Jan 1 00:00:00 UTC 1970"
         run: |
           set -euxo pipefail
           cd kernel
@@ -1478,160 +1113,9 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
           path: artifacts/
           if-no-files-found: error
-
-      # Publish a Markdown job summary with applied vs. skipped tweaks and artifact SHA-256 checksums
-      - name: Publish build summary
-        env:
-          KERNEL_REPO: ${{ inputs.kernel_repo }}
-          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
-          ROOT_VARIANT: ${{ inputs.root_variant }}
-          TCP_CONGESTION: ${{ inputs.tcp_congestion }}
-          OPTIMIZE_LEVEL: ${{ inputs.optimize_level }}
-          ENABLE_MLGO: ${{ inputs.enable_mlgo }}
-          IO_SCHEDULER: ${{ inputs.io_scheduler }}
-          BORE_SCHEDULER: ${{ inputs.bore_scheduler }}
-          ENABLE_BASEBAND_GUARD: ${{ inputs.enable_baseband_guard }}
-          ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
-          ENABLE_UNICODE_FIX: ${{ inputs.enable_unicode_fix }}
-          ENABLE_MGLRU: ${{ inputs.enable_mglru }}
-          ENABLE_CPU_TUNE: ${{ inputs.enable_cpu_tune }}
-          ENABLE_LAZY_RCU: ${{ inputs.enable_lazy_rcu }}
-          NET_QDISC: ${{ inputs.net_qdisc }}
-          ENABLE_HZ_300: ${{ inputs.enable_hz_300 }}
-          CPU_GOVERNORS: ${{ inputs.cpu_governors }}
-          ENABLE_TTL_MANGLING: ${{ inputs.enable_ttl_mangling }}
-          ENABLE_NTFS3: ${{ inputs.enable_ntfs3 }}
-          ENABLE_KMI_SAFE_TWEAKS: ${{ inputs.enable_kmi_safe_tweaks }}
-        run: |
-          set -euo pipefail
-          BASE_CFG="${RUNNER_TEMP}/base.config"
-          FINAL_CFG="kernel/out/.config"
-
-          has_sym() {
-            grep -qE "^CONFIG_${2}=[ym]$" "$1" 2>/dev/null
-          }
-
-          status_for_sym() {
-            local requested="$1"
-            local sym="$2"
-            if [ "${requested}" != "true" ]; then
-              echo "Disabled"
-            elif has_sym "${BASE_CFG}" "${sym}"; then
-              echo "Skipped (already in source)"
-            elif has_sym "${FINAL_CFG}" "${sym}"; then
-              echo "Applied"
-            else
-              echo "Unsupported / Dropped"
-            fi
-          }
-
-          status_for_all_syms() {
-            local requested="$1"
-            shift
-            if [ "${requested}" != "true" ]; then
-              echo "Disabled"
-              return
-            fi
-            local all_base=1
-            local all_final=1
-            for s in "$@"; do
-              has_sym "${BASE_CFG}" "${s}" || all_base=0
-              has_sym "${FINAL_CFG}" "${s}" || all_final=0
-            done
-            if [ "${all_base}" -eq 1 ]; then
-              echo "Skipped (already in source)"
-            elif [ "${all_final}" -eq 1 ]; then
-              echo "Applied"
-            else
-              echo "Unsupported / Partial"
-            fi
-          }
-
-          DEF_TCP="$(awk -F '=' '/^CONFIG_DEFAULT_TCP_CONG=/ {gsub(/"/, "", $2); print $2; exit}' "${FINAL_CFG}")"
-          DEF_QDISC="$(awk -F '=' '/^CONFIG_DEFAULT_NET_SCH=/ {gsub(/"/, "", $2); print $2; exit}' "${FINAL_CFG}")"
-          DEF_HZ="$(awk -F '=' '/^CONFIG_HZ=/ {print $2; exit}' "${FINAL_CFG}")"
-          LTO_MODE="None"
-          grep -qx 'CONFIG_LTO_CLANG_THIN=y' "${FINAL_CFG}" && LTO_MODE="ThinLTO"
-          grep -qx 'CONFIG_LTO_CLANG_FULL=y' "${FINAL_CFG}" && LTO_MODE="Full LTO"
-
-          MLGO_STATUS="Disabled"
-          if [ "${ENABLE_MLGO}" = "true" ]; then
-            if [[ "${EXTRA_KCFLAGS:-}" == *"regalloc-enable-advisor=release"* ]]; then
-              MLGO_STATUS="Applied"
-            else
-              MLGO_STATUS="Skipped (unsupported by Clang)"
-            fi
-          fi
-
-          TUNE_STATUS="Disabled"
-          if [ "${ENABLE_CPU_TUNE}" = "true" ]; then
-            if [[ "${EXTRA_KCFLAGS:-}" == *"-mtune=cortex-a720"* ]]; then
-              TUNE_STATUS="Applied"
-            else
-              TUNE_STATUS="Skipped (unsupported by Clang)"
-            fi
-          fi
-
-          FQ_REQ="false"
-          CAKE_REQ="false"
-          if [ "${NET_QDISC}" = "fq" ] || [ "${NET_QDISC}" = "fq-cake" ]; then FQ_REQ="true"; fi
-          if [ "${NET_QDISC}" = "fq-cake" ]; then CAKE_REQ="true"; fi
-
-          OND_REQ="false"
-          USR_REQ="false"
-          if [ "${CPU_GOVERNORS}" = "ondemand" ] || [ "${CPU_GOVERNORS}" = "all" ]; then OND_REQ="true"; fi
-          if [ "${CPU_GOVERNORS}" = "userspace" ] || [ "${CPU_GOVERNORS}" = "all" ]; then USR_REQ="true"; fi
-
-          {
-            echo "## POCO F6 (peridot) Kernel Build Summary"
-            echo ""
-            echo "| Field | Value |"
-            echo "| :--- | :--- |"
-            echo "| **Kernel** | \`${KERNEL_VERSION}\` (\`${KERNEL_REPO}@${KERNEL_BRANCH}\`, \`${SHORT_COMMIT}\`) |"
-            echo "| **Root Variant** | \`${ROOT_VARIANT}\` |"
-            echo "| **Toolchain** | AOSP Clang \`${CLANG_VERSION}\` (\`${LTO_MODE}\`, \`-${OPTIMIZE_LEVEL}\`) |"
-            echo "| **Extra KCFLAGS** | \`${EXTRA_KCFLAGS:-none}\` |"
-            echo "| **Output Zip** | \`${ZIP_NAME}\` |"
-            echo ""
-            echo "### Tweaks & Features"
-            echo ""
-            echo "| Feature | Input | Status | Effective Config |"
-            echo "| :--- | :--- | :--- | :--- |"
-            echo "| **TCP Congestion** | \`${TCP_CONGESTION}\` | $([ "${TCP_CONGESTION}" = "stock" ] && echo "Stock" || echo "Applied") | \`${DEF_TCP:-unknown}\` |"
-            echo "| **FQ Default Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${FQ_REQ}" "DEFAULT_FQ") | \`${DEF_QDISC:-unknown}\` |"
-            echo "| **CAKE Qdisc** | \`${NET_QDISC}\` | $(status_for_sym "${CAKE_REQ}" "NET_SCH_CAKE") | \`CONFIG_NET_SCH_CAKE\` |"
-            echo "| **I/O Scheduler** | \`${IO_SCHEDULER}\` | $([ "${IO_NORM}" = "stock" ] && echo "Stock" || echo "Applied") | \`${IO_NORM}\` |"
-            echo "| **BORE Scheduler** | \`${BORE_SCHEDULER}\` | $(case "${BORE_SCHEDULER}" in disabled) echo "Disabled (forced off)";; stock) echo "Stock (tree default)";; *) echo "Applied";; esac) | \`${BORE_SCHEDULER}\` |"
-            echo "| **MGLRU** | \`${ENABLE_MGLRU}\` | $(status_for_all_syms "${ENABLE_MGLRU}" LRU_GEN LRU_GEN_ENABLED) | \`CONFIG_LRU_GEN_ENABLED\` |"
-            echo "| **Lazy RCU** | \`${ENABLE_LAZY_RCU}\` | $(status_for_sym "${ENABLE_LAZY_RCU}" "RCU_LAZY") | \`CONFIG_RCU_LAZY\` |"
-            echo "| **300 Hz Timer Tick** | \`${ENABLE_HZ_300}\` | $(status_for_sym "${ENABLE_HZ_300}" "HZ_300") | \`${DEF_HZ:-unknown} Hz\` |"
-            echo "| **MLGO Regalloc** | \`${ENABLE_MLGO}\` | ${MLGO_STATUS} | \`-regalloc-enable-advisor=release\` |"
-            echo "| **SM8635 CPU Tune** | \`${ENABLE_CPU_TUNE}\` | ${TUNE_STATUS} | \`-mtune=cortex-a720\` |"
-            echo "| **Governor: ondemand** | \`${CPU_GOVERNORS}\` | $(status_for_sym "${OND_REQ}" "CPU_FREQ_GOV_ONDEMAND") | \`CONFIG_CPU_FREQ_GOV_ONDEMAND\` |"
-            echo "| **Governor: userspace** | \`${CPU_GOVERNORS}\` | $(status_for_sym "${USR_REQ}" "CPU_FREQ_GOV_USERSPACE") | \`CONFIG_CPU_FREQ_GOV_USERSPACE\` |"
-            echo "| **Hotspot TTL/HL Mangling** | \`${ENABLE_TTL_MANGLING}\` | $(status_for_all_syms "${ENABLE_TTL_MANGLING}" NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL) | \`XT_HL / TTL / HL\` |"
-            echo "| **Native NTFS3 FS** | \`${ENABLE_NTFS3}\` | $(status_for_sym "${ENABLE_NTFS3}" "NTFS3_FS") | \`CONFIG_NTFS3_FS\` |"
-            echo "| **Baseband-guard LSM** | \`${ENABLE_BASEBAND_GUARD}\` | $([ "${ENABLE_BASEBAND_GUARD}" = "true" ] && echo "Applied" || echo "Disabled") | \`CONFIG_BBG\` |"
-            echo "| **Droidspaces** | \`${ENABLE_DROIDSPACES}\` | $([ "${ENABLE_DROIDSPACES}" = "true" ] && echo "Applied" || echo "Disabled") | \`SYSVIPC / NS\` |"
-            echo "| **Unicode Bypass Fix** | \`${ENABLE_UNICODE_FIX}\` | $([ "${ENABLE_UNICODE_FIX}" = "true" ] && echo "Applied" || echo "Disabled") | \`unicode_bypass_fix_6.1+\` |"
-            echo "| **KMI-Safe Tweaks Pack** | \`${ENABLE_KMI_SAFE_TWEAKS}\` | $([ "${ENABLE_KMI_SAFE_TWEAKS}" = "true" ] && echo "${KMI_TWEAKS_STATUS:-Applied}" || echo "Disabled") | \`kmi-safe-tweaks-6.1.patch\` |"
-            echo ""
-            echo "### Artifact SHA-256 Checksums"
-            echo ""
-            echo "| File | Size | SHA-256 |"
-            echo "| :--- | :--- | :--- |"
-            for f in "${ZIP_NAME}" Image.gz Image; do
-              if [ -f "${GITHUB_WORKSPACE}/artifacts/${f}" ]; then
-                SIZE="$(du -h "${GITHUB_WORKSPACE}/artifacts/${f}" | awk '{print $1}')"
-                SHA="$(sha256sum "${GITHUB_WORKSPACE}/artifacts/${f}" | awk '{print $1}')"
-                echo "| \`${f}\` | ${SIZE} | \`${SHA}\` |"
-              fi
-            done
-          } >> "${GITHUB_STEP_SUMMARY}"
-
 
       # Upload the build log on failure so compilation errors can still be downloaded
       - name: Upload build log on failure
