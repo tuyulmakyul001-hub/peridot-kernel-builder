@@ -281,6 +281,8 @@ jobs:
 
           SHORT_COMMIT="$(git rev-parse --short=7 HEAD)"
           BUILD_DATE="$(date -u +%Y%m%d)"
+          BUILD_TIME="$(date -u +%H%M%S)"
+          RUN_TAG="r${GITHUB_RUN_NUMBER:-0}a${GITHUB_RUN_ATTEMPT:-1}"
 
           LOCAL_SUFFIX="${RAW_LOCAL_VERSION#-}"
           if [ -n "${LOCAL_SUFFIX}" ]; then
@@ -339,13 +341,16 @@ jobs:
           echo "Normalized io_scheduler: ${IO_NORM} (adios=${IO_WANT_ADIOS}, cpq=${IO_WANT_CPQ}, kyber=${IO_WANT_KYBER}, bfq=${IO_WANT_BFQ})"
 
           FEATURE_TAG="tcp-${TCP_CONGESTION}-opt-${OPTIMIZE_LEVEL}-mlgo-${ENABLE_MLGO}-io-${IO_NORM}-bore-${BORE_SCHEDULER}-bbg-${ENABLE_BASEBAND_GUARD}-ds-${ENABLE_DROIDSPACES}-uni-${ENABLE_UNICODE_FIX}-mglru-${ENABLE_MGLRU}-tune-${ENABLE_CPU_TUNE}-lrcu-${ENABLE_LAZY_RCU}-qdisc-${NET_QDISC}-hz300-${ENABLE_HZ_300}-gov-${CPU_GOVERNORS}-ttl-${ENABLE_TTL_MANGLING}-ntfs3-${ENABLE_NTFS3}-kmitwk-${ENABLE_KMI_SAFE_TWEAKS}"
-          ZIP_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${SHORT_COMMIT}.zip"
+          ARTIFACT_NAME="${KERNEL_NAME}-${ROOT_VARIANT}-${BUILD_DATE}-${BUILD_TIME}-${RUN_TAG}-${SHORT_COMMIT}"
+          ZIP_NAME="${ARTIFACT_NAME}.zip"
 
           {
             echo "KERNEL_VERSION=${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
             echo "CLANG_VERSION=${CLANG_VERSION}"
             echo "SHORT_COMMIT=${SHORT_COMMIT}"
             echo "BUILD_DATE=${BUILD_DATE}"
+            echo "BUILD_TIME=${BUILD_TIME}"
+            echo "RUN_TAG=${RUN_TAG}"
             echo "LOCAL_SUFFIX=${LOCAL_SUFFIX}"
             echo "KERNEL_NAME=${KERNEL_NAME}"
             echo "IO_NORM=${IO_NORM}"
@@ -354,6 +359,7 @@ jobs:
             echo "IO_WANT_KYBER=${IO_WANT_KYBER}"
             echo "IO_WANT_BFQ=${IO_WANT_BFQ}"
             echo "FEATURE_TAG=${FEATURE_TAG}"
+            echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
             echo "ZIP_NAME=${ZIP_NAME}"
           } >> "${GITHUB_ENV}"
 
@@ -449,12 +455,26 @@ jobs:
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
             ccache-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-
 
-      # Set ccache size limits and zero out per-run statistics
+      # Restore and persist ThinLTO linker cache between workflow runs
+      - name: Cache ThinLTO
+        uses: actions/cache@v5
+        with:
+          path: kernel/out/.thinlto-cache
+          key: thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-${{ env.SHORT_COMMIT }}
+          restore-keys: |
+            thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-${{ env.FEATURE_TAG }}-
+            thinlto-${{ env.CLANG_VERSION }}-${{ inputs.kernel_branch }}-${{ inputs.root_variant }}-
+
+      # Set ccache size limits, runner-friendly sloppiness, and zero out per-run statistics
       - name: Configure ccache
         run: |
           set -euxo pipefail
           ccache --set-config=max_size=4G
           ccache --set-config=compression=true
+          ccache --set-config=compression_level=1
+          ccache --set-config=hash_dir=false
+          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
+          ccache --set-config=base_dir="${GITHUB_WORKSPACE}/kernel"
           ccache -z
 
       # Integrate selected root solution (KernelSU-Next, SukiSU-Nova, or BakaSU)
@@ -1357,6 +1377,8 @@ jobs:
 
       # Compile the GKI kernel Image with selected optimization/MLGO flags and capture the full build log
       - name: Build kernel Image
+        env:
+          KBUILD_BUILD_TIMESTAMP: "Thu Jan 1 00:00:00 UTC 1970"
         run: |
           set -euxo pipefail
           cd kernel
@@ -1456,7 +1478,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.KERNEL_NAME }}-${{ inputs.root_variant }}-${{ env.BUILD_DATE }}-${{ env.SHORT_COMMIT }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: artifacts/
           if-no-files-found: error
 
